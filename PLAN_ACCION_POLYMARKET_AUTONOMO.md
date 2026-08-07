@@ -894,6 +894,10 @@ No usar claves reales ni endpoints de producción en CI.
 
 # P11 — Despliegue gradual
 
+El checklist reproducible está en `RUNBOOK_PILOTO.md`. Sus gates operativos se
+mantienen pendientes hasta completar la observación real indicada; las pruebas
+automatizadas no sustituyen un soak ni un shadow live.
+
 ## Fase A — Paper completo
 
 Duración mínima recomendada: 14 días adicionales después de implementar el nuevo motor.

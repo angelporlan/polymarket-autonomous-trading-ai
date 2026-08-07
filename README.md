@@ -127,6 +127,8 @@ npm run build
 
 La configuración MCP incluida espera el artefacto `dist/mcp/server.js`. No inicies el servidor desde una terminal que imprima datos de autenticación y no redirijas su `stdout`: en modo MCP se reserva exclusivamente para JSON-RPC.
 
+El checklist operativo para paper soak, shadow live y canary está en [`RUNBOOK_PILOTO.md`](RUNBOOK_PILOTO.md). Sus casillas no se consideran completadas por ejecutar la suite automatizada.
+
 Scripts declarados en `package.json`:
 
 | Comando | Uso |
