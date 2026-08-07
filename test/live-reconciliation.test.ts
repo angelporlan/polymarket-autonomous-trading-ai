@@ -84,29 +84,14 @@ function liveHarness(includeUserChannel: boolean, nowMs = NOW_MS): {
   const expiration =
     Math.floor(proposal.createdAtMs / 1_000) + 60 + 15 * 60;
   database.stageProposal(proposal);
-  database.transitionProposal(
-    proposal.id,
-    "STAGED",
-    "AWAITING_LOCAL",
-    NOW_MS + 1
-  );
-  database.transitionProposal(
-    proposal.id,
-    "AWAITING_LOCAL",
-    "LOCALLY_APPROVED",
-    NOW_MS + 2
-  );
-  database.recordLocalApproval({
-    proposalId: proposal.id,
-    proposalHash: proposal.hash,
-    approvedAtMs: NOW_MS + 2,
-    expiresAtMs: proposal.expiresAtMs,
-    nonceHash: "fixture-nonce-hash",
-    consumedAtMs: null
-  });
-  expect(database.claimExecution(proposal.id, proposal.hash, NOW_MS + 3)).toBe(
-    true
-  );
+  expect(
+    database.claimAutonomousExecution(
+      proposal.id,
+      proposal.hash,
+      session.id,
+      NOW_MS + 1
+    )
+  ).toBe(true);
   database.markExecutionSubmitted({
     proposalId: proposal.id,
     proposalHash: proposal.hash,
@@ -335,11 +320,6 @@ function liveHarness(includeUserChannel: boolean, nowMs = NOW_MS): {
     },
     liveTrading,
     onchainSettlement: onchain,
-    approvals: {
-      approvalUrl() {
-        return "http://127.0.0.1:8787/";
-      }
-    },
     now: () => nowMs
   });
   return { service, database, proposal, onchain };

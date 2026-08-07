@@ -132,10 +132,6 @@ export interface OnchainSettlementPort {
   }): Promise<OnchainSettlementResult>;
 }
 
-export interface ApprovalUrlPort {
-  approvalUrl(proposalId: string): string;
-}
-
 export interface StageOrderInput {
   executionMode: "paper" | "live";
   intent: OrderIntentType;

@@ -22,15 +22,15 @@ Estas reglas aplican a todo el repositorio y no se relajan por conveniencia, pru
 
 - Live permanece cerrado salvo que coincidan todas las barreras: flag de entorno, activación persistida local, paper gate superado (excepto que en `.env` la variable `PAPER_GATE_SKIP` esté en `true`), cuenta verificada, Keychain y credenciales preparados, emergency stop inactivo, geoblock fresco permitido y propuesta vigente e intacta.
 - **No hay confirmación humana por orden.** `stage_order` valida límites y genera el hash inmutable de la propuesta. `execute_staged_order` procede directamente a `submitStagedOrder` en cuanto la propuesta pasa todos los checks de riesgo — la aprobación es automática, no un atajo temporal a rellenar por una persona.
-- Toda modificación de precio, tamaño, mercado, outcome, reglas, tick, `negRisk` o exposición respecto a la propuesta original invalida la aprobación automática y fuerza re-staging.
-- Consume aprobación y ejecución atómicamente por `proposalId` y hash. Los reintentos deben ser idempotentes y no pueden duplicar una orden.
+- Toda modificación de precio, tamaño, mercado, outcome, reglas, tick, `negRisk` o exposición respecto a la propuesta original invalida la ejecución automática y fuerza re-staging.
+- Consume la reserva de sesión y la ejecución atómicamente por `proposalId` y hash. Los reintentos deben ser idempotentes y no pueden duplicar una orden.
 - Una respuesta bloqueada, desconocida, antigua, incompleta o inconsistente se interpreta como bloqueo. No uses defaults permisivos.
 
 ## Panel local — monitoreo, no aprobación
 
-- El servidor en `127.0.0.1` deja de ser una puerta de aprobación y pasa a ser un dashboard de solo lectura: estado del agente, propuestas ejecutadas, PnL, ledger.
+- El servidor en `127.0.0.1` es un dashboard de solo lectura: estado del agente, propuestas ejecutadas, PnL, ledger.
 - No expone ninguna acción que apruebe, firme o modifique una orden en curso. Es observabilidad, no control.
-- Conserva validación exacta de `Host` y `Origin`, cookie `HttpOnly`/`SameSite=Strict`, CSP y escape HTML, aunque ya no gestione secretos de aprobación — sigue siendo una superficie local que no debe exponerse en red ni llevar CORS.
+- Conserva validación exacta de `Host` y `Origin`, cookie `HttpOnly`/`SameSite=Strict`, CSP y escape HTML; sigue siendo una superficie local que no debe exponerse en red ni llevar CORS.
 
 ## Riesgo y operativa — límites autoajustables con un techo fijo
 
@@ -46,7 +46,7 @@ Estas reglas aplican a todo el repositorio y no se relajan por conveniencia, pru
 
 - El fallo seguro es bloquear primero. Ante pérdida de heartbeat, datos obsoletos, inconsistencia, API inestable o error de firma: activa el lock persistente y cancela de mejor esfuerzo.
 - No confundas una solicitud de cancelación con una cancelación confirmada. Reconcilia REST/CLOB, actividad remota y ledger antes de declarar estado terminal.
-- Preserva la cadena de auditoría, timestamps, hashes, respuestas sanitizadas, fills y fees, incluyendo el historial de ajustes de parámetros del agente. Un reinicio debe invalidar aprobaciones efímeras y no repetir ejecuciones.
+- Preserva la cadena de auditoría, timestamps, hashes, respuestas sanitizadas, fills y fees, incluyendo el historial de ajustes de parámetros del agente. Un reinicio debe invalidar propuestas de ejecución efímeras y no repetir ejecuciones.
 - Nunca borres ni reescribas el ledger para hacer pasar métricas paper o pruebas de aceptación.
 
 ## Desarrollo y pruebas

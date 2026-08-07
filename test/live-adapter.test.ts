@@ -539,7 +539,7 @@ function approvedProposal(): OrderProposal {
   intent.executionMode = "live";
   intent.sessionId = "fixture-session";
   const proposal = createOrderProposal(intent, riskContextFixture(NOW_MS));
-  return { ...proposal, status: "LOCALLY_APPROVED" };
+  return { ...proposal, status: "EXECUTING" };
 }
 
 function successfulResponse(order: SignedOrder | string): OrderResponse {

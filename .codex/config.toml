@@ -12,6 +12,7 @@ tool_timeout_sec = 60
 [mcp_servers.polymarket.env]
 POLYMARKET_PROFILE_ADDRESS = "0x0000000000000000000000000000000000000000"
 POLYMARKET_DB_PATH = "./data/polymarket.sqlite"
+# Legacy variable names retained for the localhost read-only dashboard.
 POLYMARKET_APPROVAL_HOST = "127.0.0.1"
 POLYMARKET_APPROVAL_PORT = "8787"
 POLYMARKET_LIVE_ENABLED = "false"

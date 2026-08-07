@@ -4,7 +4,7 @@ import http, {
   type ServerResponse
 } from "node:http";
 import { URL } from "node:url";
-import { formatMicros, type OrderProposal } from "../domain/types.js";
+import { formatMicros } from "../domain/types.js";
 import type { TradingDatabase } from "../storage/database.js";
 
 export interface DashboardHttpServerOptions {
@@ -14,20 +14,12 @@ export interface DashboardHttpServerOptions {
   now?: () => number;
 }
 
-export type ApprovalHttpServerOptions = DashboardHttpServerOptions & {
-  onApproved?: (proposal: OrderProposal) => Promise<{ accepted: boolean; message: string }>;
-};
-
 export class DashboardHttpServer {
   private readonly now: () => number;
   private server: Server | null = null;
 
   constructor(private readonly options: DashboardHttpServerOptions) {
     this.now = options.now ?? Date.now;
-  }
-
-  approvalUrl(_proposalId: string): string {
-    return `http://${this.options.host}:${this.options.port}/dashboard`;
   }
 
   async start(): Promise<void> {
@@ -77,7 +69,7 @@ export class DashboardHttpServer {
     request: IncomingMessage,
     response: ServerResponse
   ): Promise<void> {
-    const origin = validateApprovalOrigin(request, this.options.port);
+    const origin = validateDashboardOrigin(request, this.options.port);
     if (!origin.valid) {
       this.respondHtml(
         response,
@@ -94,7 +86,7 @@ export class DashboardHttpServer {
         response,
         405,
         "Method Not Allowed",
-        genericMessagePage("METHOD_NOT_ALLOWED", "The local dashboard operates strictly in read-only monitoring mode. Order submission and approval forms are permanently disabled.")
+        genericMessagePage("METHOD_NOT_ALLOWED", "The local dashboard operates strictly in read-only monitoring mode. Order submission, signing, and other financial actions are permanently disabled.")
       );
       return;
     }
@@ -119,7 +111,26 @@ export class DashboardHttpServer {
     const paperSession = this.options.database.getActiveTradingSession("paper", nowMs);
     const liveSession = this.options.database.getActiveTradingSession("live", nowMs);
     const positions = this.options.database.listPositionRecords();
+    const researchBundles = this.options.database.listResearchBundles();
+    const proposals = this.options.database.listProposals();
     const executions = this.options.database.listExecutions();
+    const paperTrades = this.options.database.listPaperTrades();
+    const cooldown = this.options.database.getCooldown();
+    const supervisor = this.options.database.getSupervisorHeartbeat();
+    const openPositions = positions.filter(
+      (position) => position.exitState !== "CLOSED" && position.sharesMicros > 0n
+    );
+    const realizedPaperPnlMicros = paperTrades.reduce(
+      (total, trade) => total + trade.realizedPnlMicros,
+      0n
+    );
+    const paperFeesMicros = paperTrades.reduce(
+      (total, trade) => total + trade.feesMicros,
+      0n
+    );
+    const executionByProposal = new Map(
+      executions.map((execution) => [execution.proposalId, execution])
+    );
 
     return {
       status: emergency.active ? "EMERGENCY_STOPPED" : activation.active ? "LIVE_ACTIVE" : "READ_ONLY",
@@ -143,7 +154,103 @@ export class DashboardHttpServer {
             }
           : null
       },
-      openPositionsCount: positions.length,
+      positions: openPositions.map((position) => ({
+        tokenId: position.tokenId,
+        conditionId: position.conditionId,
+        question: position.question,
+        outcome: position.outcome,
+        side: position.side,
+        shares: formatMicros(position.sharesMicros),
+        averagePricePusd: formatMicros(position.averagePriceMicros),
+        evidenceQuality: position.evidenceQuality,
+        openedAt: toIsoOrNull(position.openedAtMs),
+        lastEvaluatedAt: new Date(position.lastEvaluatedAtMs).toISOString(),
+        lastMarketPricePusd: formatMicros(position.lastMarketPriceMicros),
+        lastResearchBundleId: position.lastResearchBundleId,
+        exitState: position.exitState,
+        activeExitProposalId: position.activeExitProposalId,
+        activeExitOrderId: position.activeExitOrderId
+      })),
+      researchBundles: researchBundles.map((bundle) => ({
+        id: bundle.id,
+        conditionId: bundle.marketConditionId,
+        tokenId: bundle.tokenId,
+        estimatedProbability: formatMicros(bundle.estimatedProbabilityMicros),
+        eventVolatilityClass: bundle.eventVolatilityClass,
+        createdAt: new Date(bundle.createdAtMs).toISOString(),
+        expiresAt: new Date(bundle.expiresAtMs).toISOString(),
+        sourceCount: bundle.sources.length,
+        contentHash: bundle.contentHash
+      })),
+      orders: proposals.map((proposal) => {
+        const execution = executionByProposal.get(proposal.id);
+        return {
+          proposalId: proposal.id,
+          proposalHash: proposal.hash,
+          status: proposal.status,
+          intent: proposal.intent,
+          executionMode: proposal.executionMode,
+          sessionId: proposal.sessionId,
+          researchBundleId: proposal.researchBundleId,
+          tokenId: proposal.market.tokenId,
+          conditionId: proposal.market.conditionId,
+          side: proposal.side,
+          shares: formatMicros(proposal.sharesMicros),
+          limitPricePusd: formatMicros(proposal.limitPriceMicros),
+          createdAt: new Date(proposal.createdAtMs).toISOString(),
+          expiresAt: new Date(proposal.expiresAtMs).toISOString(),
+          execution: execution
+            ? {
+                orderId: execution.clobOrderId,
+                status: execution.status,
+                submittedAt: new Date(execution.submittedAtMs).toISOString()
+              }
+            : null
+        };
+      }),
+      pnl: {
+        paper: {
+          realizedPusd: formatMicros(realizedPaperPnlMicros),
+          feesPusd: formatMicros(paperFeesMicros),
+          netPusd: formatMicros(realizedPaperPnlMicros - paperFeesMicros),
+          openTrades: paperTrades.filter((trade) => trade.status === "OPEN").length
+        },
+        live: {
+          known: false,
+          source: "remote_reconciliation"
+        }
+      },
+      locks: {
+        emergencyStop: emergency,
+        liveActivation: activation,
+        cooldown: {
+          active: cooldown.untilMs > nowMs,
+          reason: cooldown.reason,
+          until: cooldown.untilMs > 0 ? new Date(cooldown.untilMs).toISOString() : null,
+          updatedAt: toIsoOrNull(cooldown.updatedAtMs)
+        },
+        supervisor: supervisor
+          ? {
+              status: supervisor.status,
+              pid: supervisor.pid,
+              consecutiveFailures: supervisor.consecutiveFailures,
+              reconciliationActive: supervisor.reconciliationActive,
+              lastCycleAt: toIsoOrNull(supervisor.lastCycleAtMs),
+              lastSuccessAt: toIsoOrNull(supervisor.lastSuccessAtMs),
+              nextCycleAt: toIsoOrNull(supervisor.nextCycleAtMs),
+              lastErrorCode: supervisor.lastErrorCode
+            }
+          : null
+      },
+      lastReconciliation: supervisor
+        ? {
+            at: toIsoOrNull(supervisor.lastSuccessAtMs),
+            status: supervisor.status,
+            active: supervisor.reconciliationActive
+          }
+        : null,
+      openPositionsCount: openPositions.length,
+      trackedPositionsCount: positions.length,
       recentExecutionsCount: executions.length,
       updatedAt: new Date(nowMs).toISOString()
     };
@@ -220,7 +327,9 @@ export class DashboardHttpServer {
   }
 }
 
-export class ApprovalHttpServer extends DashboardHttpServer {}
+function toIsoOrNull(value: number | null): string | null {
+  return value === null || value <= 0 ? null : new Date(value).toISOString();
+}
 
 function escapeHtml(value: string): string {
   return value
@@ -251,7 +360,7 @@ function readSingleRawHeader(
   return values.length === 1 ? values[0]! : null;
 }
 
-function normalizeApprovalHost(
+function normalizeDashboardHost(
   hostHeader: string | undefined,
   expectedPort: number
 ): string | null {
@@ -265,11 +374,11 @@ function normalizeApprovalHost(
   return null;
 }
 
-function validateApprovalOrigin(
+function validateDashboardOrigin(
   request: IncomingMessage,
   expectedPort: number
 ): { valid: boolean; normalizedHost: string | null; normalizedOrigin: string | null; reason: string | null } {
-  const normalizedHost = normalizeApprovalHost(
+  const normalizedHost = normalizeDashboardHost(
     request.headers.host,
     expectedPort
   );

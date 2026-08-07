@@ -157,13 +157,13 @@ export class RestrictedKeychainSigner {
           }
         : validateOrder(this.permit, domain, types, value, this.now());
 
-    // A failed Keychain prompt or signing attempt consumes the permit. Retrying
-    // requires a fresh human approval and prevents prompt/replay ambiguity.
+    // A failed Keychain access or signing attempt consumes the permit. Retrying
+    // requires a fresh staged execution permit and prevents replay ambiguity.
     this.consumed = true;
     const privateKey = await this.keychain.readSocialPrivateKey({
       reason:
         this.permit.purpose === "order"
-          ? approvalReason(this.permit)
+          ? signingReason(this.permit)
           : "Authorize Polymarket credential setup"
     });
 
@@ -492,7 +492,7 @@ function validateOrderMessage(
   }
 }
 
-function approvalReason(permit: OrderSigningPermit): string {
+function signingReason(permit: OrderSigningPermit): string {
   const side = permit.side === 0 ? "BUY" : "SELL";
   return `Authorize ${side} order ${permit.proposalHash.slice(0, 8)}…${permit.proposalHash.slice(-8)}`;
 }

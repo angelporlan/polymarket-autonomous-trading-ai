@@ -238,8 +238,6 @@ export class DatabaseRiskContext implements RiskContextPort {
       }
       if (
         proposal.status !== "STAGED" &&
-        proposal.status !== "AWAITING_LOCAL" &&
-        proposal.status !== "LOCALLY_APPROVED" &&
         proposal.status !== "SUBMITTED" &&
         proposal.status !== "EXECUTING"
       ) {

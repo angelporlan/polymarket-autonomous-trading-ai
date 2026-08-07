@@ -181,7 +181,6 @@ describe("legacy position import", () => {
           throw new Error("not used");
         }
       },
-      approvals: { approvalUrl: (proposalId: string) => `/approve/${proposalId}` },
       now: () => NOW_MS
     });
 

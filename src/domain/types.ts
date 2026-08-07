@@ -12,8 +12,6 @@ export type ExitReason =
 export type ProposalStatus =
   | "STAGED"
   | "SIMULATED"
-  | "AWAITING_LOCAL"
-  | "LOCALLY_APPROVED"
   | "EXECUTING"
   | "SUBMITTED"
   | "CANCELLED"
@@ -247,15 +245,6 @@ export interface LegacyImportReport {
   ordersChecked: boolean;
   transactionHashes: string[];
   message: string;
-}
-
-export interface LocalApproval {
-  proposalId: string;
-  proposalHash: string;
-  approvedAtMs: number;
-  expiresAtMs: number;
-  nonceHash: string;
-  consumedAtMs: number | null;
 }
 
 export interface ExecutionRecord {

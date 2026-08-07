@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { exportLedger } from "../src/audit/exporter.js";
 import { createOrderProposal } from "../src/domain/proposals.js";
 import { createTradingSession } from "../src/domain/session.js";
-import type { LocalApproval, OrderProposal } from "../src/domain/types.js";
+import type { OrderProposal } from "../src/domain/types.js";
 import { TradingDatabase } from "../src/storage/database.js";
 import { intentFixture, riskContextFixture } from "./fixtures.js";
 
@@ -38,30 +38,14 @@ function submitProposalWithResponse(
   nowMs: number
 ): void {
   database.stageProposal(proposal);
-  database.transitionProposal(
-    proposal.id,
-    "STAGED",
-    "AWAITING_LOCAL",
-    nowMs + 1
-  );
-  database.transitionProposal(
-    proposal.id,
-    "AWAITING_LOCAL",
-    "LOCALLY_APPROVED",
-    nowMs + 2
-  );
-  const approval: LocalApproval = {
-    proposalId: proposal.id,
-    proposalHash: proposal.hash,
-    approvedAtMs: nowMs + 2,
-    expiresAtMs: proposal.expiresAtMs,
-    nonceHash: `nonce-${proposal.id}`,
-    consumedAtMs: null
-  };
-  database.recordLocalApproval(approval);
-  expect(database.claimExecution(proposal.id, proposal.hash, nowMs + 3)).toBe(
-    true
-  );
+  expect(
+    database.claimAutonomousExecution(
+      proposal.id,
+      proposal.hash,
+      proposal.sessionId,
+      nowMs + 1
+    )
+  ).toBe(true);
   database.markExecutionSubmitted({
     proposalId: proposal.id,
     proposalHash: proposal.hash,

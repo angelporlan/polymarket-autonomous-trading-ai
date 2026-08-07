@@ -198,7 +198,6 @@ describe("live EXIT reservations", () => {
           blockTimestampsMs: []
         })
       },
-      approvals: { approvalUrl: (proposalId: string) => `/approve/${proposalId}` },
       now: () => NOW_MS
     });
     const exitIntent = intentFixture(NOW_MS);

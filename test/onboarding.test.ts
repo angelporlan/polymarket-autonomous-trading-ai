@@ -10,7 +10,6 @@ import type { AppConfig } from "../src/config.js";
 import { createOrderProposal } from "../src/domain/proposals.js";
 import { createTradingSession } from "../src/domain/session.js";
 import type {
-  LocalApproval,
   OrderProposal,
   PortfolioPosition,
   PortfolioSnapshot,
@@ -707,28 +706,7 @@ function seedSubmittedExecution(
   intent.sessionId = session.id;
   const proposal = createOrderProposal(intent, riskContextFixture(nowMs));
   database.stageProposal(proposal);
-  database.transitionProposal(
-    proposal.id,
-    "STAGED",
-    "AWAITING_LOCAL",
-    nowMs + 1
-  );
-  database.transitionProposal(
-    proposal.id,
-    "AWAITING_LOCAL",
-    "LOCALLY_APPROVED",
-    nowMs + 2
-  );
-  const approval: LocalApproval = {
-    proposalId: proposal.id,
-    proposalHash: proposal.hash,
-    approvedAtMs: nowMs + 2,
-    expiresAtMs: proposal.expiresAtMs,
-    nonceHash: "fixture-nonce-hash",
-    consumedAtMs: null
-  };
-  database.recordLocalApproval(approval);
-  if (!database.claimExecution(proposal.id, proposal.hash, nowMs + 3)) {
+  if (!database.claimAutonomousExecution(proposal.id, proposal.hash, session.id, nowMs + 1)) {
     throw new Error("Could not seed the fixture execution.");
   }
   database.markExecutionSubmitted({

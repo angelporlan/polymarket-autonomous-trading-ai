@@ -755,22 +755,22 @@ La posición concreta de Macron sigue pendiente de identificar el `tokenId` y co
 
 ## Eliminar o retirar
 
-- [ ] `beginExecution` basado en `AWAITING_LOCAL`.
-- [ ] `executeLocallyApproved`.
-- [ ] `ApprovalUrlPort`.
-- [ ] tabla y modelo `LocalApproval` si ya no se usa para autorización de sesión.
-- [ ] estados de propuesta:
+- [x] `beginExecution` basado en `AWAITING_LOCAL`.
+- [x] `executeLocallyApproved`.
+- [x] `ApprovalUrlPort`.
+- [x] tabla y modelo `LocalApproval` si ya no se usa para autorización de sesión.
+- [x] estados de propuesta:
   - `AWAITING_LOCAL`
   - `LOCALLY_APPROVED`
-- [ ] alias `ApprovalHttpServer`.
-- [ ] textos que hablen de confirmación manual por orden.
+- [x] alias `ApprovalHttpServer`.
+- [x] textos que hablen de confirmación manual por orden.
 
 ## Dashboard
 
-- [ ] Iniciar `DashboardHttpServer` en el arranque normal del runtime.
-- [ ] Mantenerlo solo en `127.0.0.1`.
-- [ ] Permitir solo `GET`.
-- [ ] Mostrar:
+- [x] Iniciar `DashboardHttpServer` en el arranque normal del runtime.
+- [x] Mantenerlo solo en `127.0.0.1`.
+- [x] Permitir solo `GET`.
+- [x] Mostrar:
   - estado;
   - sesiones;
   - posiciones;
@@ -779,7 +779,7 @@ La posición concreta de Macron sigue pendiente de identificar el `tokenId` y co
   - PnL;
   - locks;
   - última reconciliación.
-- [ ] No exponer acciones financieras.
+- [x] No exponer acciones financieras.
 
 ## Documentación
 
@@ -791,7 +791,18 @@ Actualizar:
 - `.codex/config.toml`
 - documentación de Antigravity
 
-La documentación debe describir exactamente el código vigente.
+La documentación debe describir exactamente el código vigente. README, AGENTS.md,
+`.env.example` y `.codex/config.toml` ya describen el dashboard de solo lectura y la
+ejecución autónoma ligada a sesiones; los nombres `POLYMARKET_APPROVAL_*` se
+conservan únicamente por compatibilidad de configuración y no representan una
+superficie de autorización.
+
+## Evidencia de completado
+
+- [x] El runtime/MCP ya no contiene `beginExecution`, `executeLocallyApproved`, `ApprovalUrlPort`, `LocalApproval`, `AWAITING_LOCAL`, `LOCALLY_APPROVED` ni el alias `ApprovalHttpServer`; las filas históricas de la tabla SQLite de aprobaciones, si existen en una base previa, no se borran ni se vuelven a leer.
+- [x] `execute_staged_order` reclama y ejecuta de forma autónoma mediante `claimAutonomousExecution`, ligado a `proposalId`, hash y sesión; no existe confirmación por orden en el dashboard.
+- [x] El dashboard arranca antes de conectar el transporte MCP, se limita a `127.0.0.1`, valida `Host`/`Origin`, acepta únicamente `GET` y expone estado, sesiones, posiciones, research bundles, órdenes, PnL paper, locks y última reconciliación sin respuestas autenticadas ni acciones financieras.
+- [x] Verificación: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `249` tests); `test/approval-server.test.ts` cubre el snapshot de telemetría y el bloqueo de `POST`.
 
 ---
 

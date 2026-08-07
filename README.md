@@ -1,8 +1,8 @@
 # Codex + Polymarket con controles de ejecución
 
-Servidor MCP local en TypeScript para consultar Polymarket, simular operaciones y, solo cuando se cumplen todas las barreras, enviar una orden limitada aprobada por la persona usuaria.
+Servidor MCP local en TypeScript para consultar Polymarket, simular operaciones y, solo cuando se cumplen todas las barreras, enviar órdenes limitadas de forma autónoma dentro de un presupuesto de sesión autorizado.
 
-Este proyecto no promete beneficios ni convierte a Codex en un gestor autónomo. Las estimaciones pueden ser erróneas, los mercados pueden moverse y se puede perder todo el capital asignado al piloto.
+Este proyecto no promete beneficios. Las estimaciones pueden ser erróneas, los mercados pueden moverse y se puede perder todo el capital asignado al piloto.
 
 ## Qué hace
 
@@ -46,7 +46,7 @@ PositionSupervisor monitoriza automáticamente posiciones abiertas (stop-loss 30
 
 El servidor local en `127.0.0.1` funciona como un dashboard de solo lectura para monitorización (estado, posiciones, PnL, presupuesto y ledger). No expone acciones de aprobación ni firma manual.
 
-`POLYMARKET_LIVE_ENABLED=true` nunca basta para operar. La ejecución real también requiere activación persistida local, superar la fase paper, correspondencia entre signer/funder/perfil, credenciales protegidas, ausencia de parada de emergencia, propuesta vigente, confirmación local y preflight final satisfactorio. Una respuesta de geoblock bloqueada, desconocida o antigua impide el envío.
+`POLYMARKET_LIVE_ENABLED=true` nunca basta para operar. La ejecución real también requiere activación persistida local de una sesión con presupuesto, superar la fase paper, correspondencia entre signer/funder/perfil, credenciales protegidas, ausencia de parada de emergencia, propuesta staged vigente y preflight final satisfactorio. Una respuesta de geoblock bloqueada, desconocida o antigua impide el envío.
 
 ## Fases
 
@@ -152,10 +152,10 @@ Las únicas variables admitidas son de configuración no secreta:
 | --- | --- | --- |
 | `POLYMARKET_PROFILE_ADDRESS` | dirección cero | Dirección pública del perfil; hay que sustituirla. |
 | `POLYMARKET_DB_PATH` | `./data/polymarket.sqlite` | Ledger SQLite local. |
-| `POLYMARKET_APPROVAL_HOST` | `127.0.0.1` | Literal fijo; no se admite una interfaz externa. |
-| `POLYMARKET_APPROVAL_PORT` | `8787` | Puerto local entre 1024 y 65535. |
+| `POLYMARKET_APPROVAL_HOST` | `127.0.0.1` | Bind del dashboard local; literal fijo, no se admite una interfaz externa. |
+| `POLYMARKET_APPROVAL_PORT` | `8787` | Puerto local del dashboard entre 1024 y 65535. |
 | `POLYMARKET_LIVE_ENABLED` | `false` | Una de varias barreras de live; no es una autorización suficiente. |
-| `PAPER_GATE_SKIP` | `false` | Override explícito y visible del gate de 30 días/50 operaciones. No relaja ninguna otra barrera ni la doble confirmación. |
+| `PAPER_GATE_SKIP` | `false` | Override explícito y visible del gate de 30 días/50 operaciones. No relaja ninguna otra barrera ni la autorización de presupuesto. |
 | `POLYMARKET_KEYCHAIN_SERVICE` | `codex-polymarket-guarded` | Mantén este valor con el helper nativo actual. |
 | `POLYGON_RPC_URL` | `https://polygon-rpc.com` | RPC público de respaldo para modos sin live. Debe ser un origen HTTPS sin ruta, query ni credenciales. |
 | `POLYGON_RPC_URLS` | vacío | En live: dos orígenes HTTPS públicos, sin credenciales y con hosts distintos, separados por coma. |
@@ -191,7 +191,7 @@ Tras compilar, reinicia Codex o recarga la configuración MCP y consulta primero
 `PAPER_GATE_SKIP=true` solo omite la evaluación de duración, número de operaciones,
 PnL y drawdown del PaperGate. El estado se muestra como `skipped` y siguen siendo
 obligatorios la cuenta verificada, Keychain, la activación local, geoblock, límites,
-reconciliación, aprobación exacta y confirmación loopback. Es un override explícito
+reconciliación, propuesta staged intacta y comprobaciones loopback. Es un override explícito
 de configuración no secreta, no una autorización de live.
 
 ## Alta local
@@ -230,11 +230,11 @@ La limpieza del bloqueo exige que no quede ninguna ejecución local ambigua, que
 
 ## Datos, auditoría y recuperación
 
-SQLite guarda propuestas, aprobaciones, ejecuciones, operaciones paper, estados persistentes y una cadena de eventos enlazada por hash. La base y su directorio se crean con permisos locales restrictivos; están excluidos de Git junto con WAL, logs, binarios y `.env`.
+SQLite guarda propuestas, sesiones, ejecuciones, operaciones paper, estados persistentes y una cadena de eventos enlazada por hash. La base y su directorio se crean con permisos locales restrictivos; están excluidos de Git junto con WAL, logs, binarios y `.env`.
 
 La exportación contable conserva pUSD como unidad primaria. Para añadir una conversión EUR reproducible, pasa un JSON de cotización pública con `baseCurrency: "pUSD"`, `quoteCurrency: "EUR"`, `rateEurPerPusd`, `observedAt`, `validUntil`, `sourceName` y una `sourceUrl` HTTPS. Las cotizaciones ausentes, caducadas o inválidas dejan EUR como `UNAVAILABLE`; nunca se sustituye silenciosamente por una tasa aproximada.
 
-La idempotencia se apoya en `proposalId`, hash exacto y consumo atómico de la aprobación. Un reinicio invalida confirmaciones en memoria e interrumpe ejecuciones pendientes de forma segura. `emergency_stop` se persiste antes de intentar cancelaciones: si la API falla, el bloqueo sigue activo.
+La idempotencia se apoya en `proposalId`, hash exacto y reclamación autónoma atómica de la ejecución. Un reinicio invalida propuestas en ejecución e interrumpe ejecuciones pendientes de forma segura. `emergency_stop` se persiste antes de intentar cancelaciones: si la API falla, el bloqueo sigue activo.
 
 Antes de confiar en el ledger:
 
@@ -262,4 +262,4 @@ npm run ledger:export -- ./exports/revision
 
 ## Principio operativo
 
-Codex puede investigar y preparar una propuesta. La decisión es siempre de la persona usuaria y cada orden real necesita aprobación del hash exacto más confirmación local. Si algún dato crítico es ambiguo, obsoleto o inconsistente, el comportamiento esperado es bloquear.
+Codex puede investigar y preparar una propuesta. El agente ejecuta de forma autónoma únicamente dentro de una sesión y presupuesto previamente autorizados, con hash exacto, límites y reconciliación. Si algún dato crítico es ambiguo, obsoleto o inconsistente, el comportamiento esperado es bloquear.

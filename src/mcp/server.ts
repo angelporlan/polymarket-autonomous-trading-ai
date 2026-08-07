@@ -119,6 +119,7 @@ export interface McpToolDependencies {
   ): Awaitable<ExecuteStagedOrderOutput>;
   cancelOrder(input: CancelOrderInput): Awaitable<CancelOrderOutput>;
   emergencyStop(input: EmergencyStopInput): Awaitable<EmergencyStopOutput>;
+  start?(): Awaitable<void>;
   close?(): Awaitable<void>;
 }
 
@@ -146,7 +147,7 @@ const STAGE_ANNOTATIONS = Object.freeze({
   openWorldHint: true
 }) satisfies ToolAnnotations;
 
-const APPROVAL_ANNOTATIONS = Object.freeze({
+const MUTATING_ANNOTATIONS = Object.freeze({
   readOnlyHint: false,
   destructiveHint: true,
   idempotentHint: true,
@@ -330,7 +331,7 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
         "Explicitly close and terminate the current active trading session for paper or live mode.",
       inputSchema: endTradingSessionInputSchema,
       outputSchema: endTradingSessionOutputSchema,
-      annotations: APPROVAL_ANNOTATIONS
+      annotations: MUTATING_ANNOTATIONS
     },
     (input) =>
       invokeStructured(endTradingSessionOutputSchema, () =>
@@ -346,7 +347,7 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
         "Evaluate all open portfolio positions against stop-loss (-30%), take-profit (+50%), max hold (14 days), and edge disappearance rules. Auto-executes exit orders for triggered positions.",
       inputSchema: supervisePositionsInputSchema,
       outputSchema: supervisePositionsOutputSchema,
-      annotations: APPROVAL_ANNOTATIONS
+      annotations: MUTATING_ANNOTATIONS
     },
     (input) =>
       invokeStructured(supervisePositionsOutputSchema, () =>
@@ -408,7 +409,7 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
         "Execute a staged proposal autonomously. Submits the order to Polymarket CLOB if live safety gates, active session budget, and risk policy checks pass.",
       inputSchema: executeStagedOrderInputSchema,
       outputSchema: executeStagedOrderOutputSchema,
-      annotations: APPROVAL_ANNOTATIONS
+      annotations: MUTATING_ANNOTATIONS
     },
     (input) =>
       invokeStructured(executeStagedOrderOutputSchema, () =>
@@ -504,6 +505,12 @@ export async function main(): Promise<void> {
   }
 
   const deps = await runtimeModule.createMcpToolDependencies();
+  try {
+    await deps.start?.();
+  } catch (error) {
+    await deps.close?.();
+    throw error;
+  }
   const server = createMcpServer(deps);
   const transport = new StdioServerTransport();
   let closing = false;

@@ -8,7 +8,6 @@ import {
 import { createTradingSession } from "../src/domain/session.js";
 import {
   PUSD_SCALE,
-  type LocalApproval,
   type OrderProposal,
   type PaperTrade,
   type PortfolioSnapshot
@@ -56,34 +55,11 @@ function submitProposal(
   nowMs: number
 ): void {
   database.stageProposal(proposal);
+  const sessionId = proposal.sessionId;
+  expect(sessionId).not.toBeNull();
   expect(
-    database.transitionProposal(
-      proposal.id,
-      "STAGED",
-      "AWAITING_LOCAL",
-      nowMs + 1
-    )
-  ).not.toBeNull();
-  expect(
-    database.transitionProposal(
-      proposal.id,
-      "AWAITING_LOCAL",
-      "LOCALLY_APPROVED",
-      nowMs + 2
-    )
-  ).not.toBeNull();
-  const approval: LocalApproval = {
-    proposalId: proposal.id,
-    proposalHash: proposal.hash,
-    approvedAtMs: nowMs + 2,
-    expiresAtMs: proposal.expiresAtMs,
-    nonceHash: `nonce-${proposal.id}`,
-    consumedAtMs: null
-  };
-  database.recordLocalApproval(approval);
-  expect(database.claimExecution(proposal.id, proposal.hash, nowMs + 3)).toBe(
-    true
-  );
+    database.claimAutonomousExecution(proposal.id, proposal.hash, sessionId, nowMs + 1)
+  ).toBe(true);
   database.markExecutionSubmitted({
     proposalId: proposal.id,
     proposalHash: proposal.hash,

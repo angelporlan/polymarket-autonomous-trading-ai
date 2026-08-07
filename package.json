@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local, approval-gated Polymarket MCP server for Codex.",
+  "description": "Local, session-budgeted autonomous Polymarket MCP server for Codex.",
   "engines": {
     "node": ">=22"
   },

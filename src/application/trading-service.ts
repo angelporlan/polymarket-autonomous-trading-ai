@@ -65,7 +65,6 @@ import {
 import type {
   AccountBindingPort,
   AccountStatus,
-  ApprovalUrlPort,
   LiveTradingPort,
   MarketDataPort,
   MarketReference,
@@ -96,7 +95,6 @@ export interface TradingServiceOptions {
   paperGateSkip?: boolean;
   liveTrading: LiveTradingPort | null;
   onchainSettlement: OnchainSettlementPort;
-  approvals: ApprovalUrlPort;
   paperSimulator?: PaperSimulator;
   now?: () => number;
 }
@@ -591,42 +589,6 @@ export class TradingService {
     return { proposal, paperTrade: null };
   }
 
-  beginExecution(proposalId: string, proposalHash: string) {
-    const proposal = this.options.database.getProposal(proposalId);
-    const nowMs = this.now();
-    if (
-      !proposal ||
-      proposal.executionMode !== "live" ||
-      proposal.hash !== proposalHash ||
-      proposal.expiresAtMs < nowMs
-    ) {
-      throw new Error("The exact live proposal is missing, changed, or expired.");
-    }
-    if (proposal.status === "AWAITING_LOCAL") {
-      return {
-        proposalId,
-        proposalHash,
-        expiresAtMs: proposal.expiresAtMs,
-        approvalUrl: this.options.approvals.approvalUrl(proposalId)
-      };
-    }
-    const awaiting = this.options.database.transitionProposal(
-      proposalId,
-      "STAGED",
-      "AWAITING_LOCAL",
-      nowMs
-    );
-    if (!awaiting) {
-      throw new Error("The proposal is not available for local approval.");
-    }
-    return {
-      proposalId,
-      proposalHash,
-      expiresAtMs: awaiting.expiresAtMs,
-      approvalUrl: this.options.approvals.approvalUrl(proposalId)
-    };
-  }
-
   async executeStagedProposal(
     proposalId: string,
     proposalHash: string
@@ -886,77 +848,6 @@ export class TradingService {
     }
 
     return { actions };
-  }
-
-  async executeLocallyApproved(
-    proposal: OrderProposal
-  ): Promise<{ accepted: boolean; message: string }> {
-    try {
-      await this.assertLiveGates();
-      await this.revalidateProposal(proposal);
-      const nowMs = this.now();
-      if (!this.options.database.claimExecution(proposal.id, proposal.hash, nowMs)) {
-        return { accepted: false, message: "Execution was already used or expired." };
-      }
-      const liveTrading = this.options.liveTrading;
-      if (!liveTrading) {
-        throw new Error("Live trading adapter is not configured.");
-      }
-      const result = await liveTrading.submitGtd(proposal, async () => {
-        await this.assertLiveGates();
-        await this.revalidateProposal(proposal);
-      });
-      if (
-        result.orderId === null ||
-        result.orderId.trim().length === 0 ||
-        result.orderId.length > 512
-      ) {
-        throw new Error("CLOB_ORDER_ID_MISSING");
-      }
-      this.options.database.markExecutionSubmitted({
-        proposalId: proposal.id,
-        proposalHash: proposal.hash,
-        clobOrderId: result.orderId,
-        status: "SUBMITTED_UNRECONCILED",
-        submittedAtMs: this.now(),
-        responseJson: stringifyWithBigInts(result.response)
-      });
-      await liveTrading.startHeartbeat();
-      return {
-        accepted: true,
-        message: result.orderId
-          ? `Polymarket order ${result.orderId} was submitted with status ${result.status}.`
-          : `Polymarket accepted the request with status ${result.status}.`
-      };
-    } catch (error) {
-      this.options.database.markExecutionFailed(proposal.id, proposal.hash);
-      this.options.database.setEmergencyStop(
-        true,
-        safeErrorCode(error),
-        this.now()
-      );
-      if (this.options.liveTrading) {
-        try {
-          await withTimeout(
-            this.options.liveTrading.cancelAll(),
-            10_000,
-            "CANCEL_ALL_TIMEOUT"
-          );
-        } catch {
-          // The persistent lock is already active. Manual reconciliation is
-          // required when best-effort cancellation cannot be confirmed.
-        }
-        try {
-          await this.options.liveTrading.stopHeartbeat();
-        } catch {
-          // Stopping local scheduling is best effort after the lock is set.
-        }
-      }
-      return {
-        accepted: false,
-        message: "Execution failed safely; the emergency lock is active."
-      };
-    }
   }
 
   async cancelOrder(orderId: string) {

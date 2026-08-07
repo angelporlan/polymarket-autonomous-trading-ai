@@ -379,7 +379,7 @@ describe("authenticated CLOB adapter", () => {
       now: () => NOW_MS
     });
 
-    const response = await client.executeApprovedProposal(proposal);
+    const response = await client.executeStagedProposal(proposal);
     expect(response.response.orderID).toBe(response.evidence.orderHash);
     expect(posted).toHaveLength(1);
     expect(posted[0]).toEqual({
@@ -426,7 +426,7 @@ describe("authenticated CLOB adapter", () => {
       now: () => NOW_MS
     });
 
-    await expect(client.executeApprovedProposal(proposal)).rejects.toMatchObject({
+    await expect(client.executeStagedProposal(proposal)).rejects.toMatchObject({
       code: "PROPOSAL_HASH_MISMATCH"
     });
     expect(submitCalls).toBe(0);
@@ -450,7 +450,7 @@ describe("authenticated CLOB adapter", () => {
 
     let caught: unknown;
     try {
-      await client.executeApprovedProposal(proposal);
+      await client.executeStagedProposal(proposal);
     } catch (error) {
       caught = error;
     }
@@ -553,7 +553,7 @@ function approvedLiveProposal(nowMs: number): OrderProposal {
   intent.executionMode = "live";
   intent.sessionId = "fixture-session";
   const proposal = createOrderProposal(intent, riskContextFixture(nowMs));
-  return { ...proposal, status: "LOCALLY_APPROVED" };
+  return { ...proposal, status: "EXECUTING" };
 }
 
 function liveAuthentication(): LiveAuthentication {

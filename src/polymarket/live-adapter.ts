@@ -233,7 +233,7 @@ export class GuardedLiveTradingAdapter implements LiveTradingPort {
     let response: OrderResponse;
     let localOrder:
       | Awaited<
-          ReturnType<PolymarketLiveClient["executeApprovedProposal"]>
+          ReturnType<PolymarketLiveClient["executeStagedProposal"]>
         >["evidence"]
       | null = null;
     try {
@@ -264,7 +264,7 @@ export class GuardedLiveTradingAdapter implements LiveTradingPort {
         "Authenticated user-channel startup timed out."
       );
       const submission = await withTimeout(
-        client.guarded.executeApprovedProposal(proposal),
+        client.guarded.executeStagedProposal(proposal),
         LIVE_SUBMISSION_TIMEOUT_MS,
         "CLOB submission result timed out."
       );

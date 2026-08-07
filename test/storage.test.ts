@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createOrderProposal } from "../src/domain/proposals.js";
 import { createTradingSession } from "../src/domain/session.js";
-import type {
-  LocalApproval,
-  OrderProposal
-} from "../src/domain/types.js";
+import type { OrderProposal } from "../src/domain/types.js";
 import { TradingDatabase } from "../src/storage/database.js";
 import { stringifyWithBigInts } from "../src/storage/codec.js";
 import { intentFixture, riskContextFixture } from "./fixtures.js";
@@ -13,38 +10,24 @@ describe("TradingDatabase", () => {
   it("persists a proposal and enforces one-shot execution", () => {
     const database = new TradingDatabase(":memory:");
     const now = Date.now();
-    const proposal = createOrderProposal(intentFixture(now), riskContextFixture(now));
+    const intent = intentFixture(now);
+    intent.executionMode = "live";
+    const session = createTradingSession({
+      executionMode: "live",
+      authorizedBudgetMicros: 10n * 1_000_000n,
+      nowMs: now
+    });
+    database.saveTradingSession(session);
+    intent.sessionId = session.id;
+    const proposal = createOrderProposal(intent, riskContextFixture(now));
     database.stageProposal(proposal);
-
     expect(database.getProposal(proposal.id)?.hash).toBe(proposal.hash);
     expect(
-      database.transitionProposal(
-        proposal.id,
-        "STAGED",
-        "AWAITING_LOCAL",
-        now + 1
-      )?.status
-    ).toBe("AWAITING_LOCAL");
+      database.claimAutonomousExecution(proposal.id, proposal.hash, session.id, now + 1)
+    ).toBe(true);
     expect(
-      database.transitionProposal(
-        proposal.id,
-        "AWAITING_LOCAL",
-        "LOCALLY_APPROVED",
-        now + 2
-      )?.status
-    ).toBe("LOCALLY_APPROVED");
-
-    const approval: LocalApproval = {
-      proposalId: proposal.id,
-      proposalHash: proposal.hash,
-      approvedAtMs: now + 2,
-      expiresAtMs: proposal.expiresAtMs,
-      nonceHash: "nonce-hash",
-      consumedAtMs: null
-    };
-    database.recordLocalApproval(approval);
-    expect(database.claimExecution(proposal.id, proposal.hash, now + 3)).toBe(true);
-    expect(database.claimExecution(proposal.id, proposal.hash, now + 4)).toBe(false);
+      database.claimAutonomousExecution(proposal.id, proposal.hash, session.id, now + 2)
+    ).toBe(false);
     expect(database.verifyAuditChain()).toBe(true);
     database.close();
   });
@@ -182,29 +165,9 @@ function submittedLiveProposal(
   intent.sessionId = session.id;
   const proposal = createOrderProposal(intent, riskContextFixture(nowMs));
   database.stageProposal(proposal);
-  database.transitionProposal(
-    proposal.id,
-    "STAGED",
-    "AWAITING_LOCAL",
-    nowMs + 1
-  );
-  database.transitionProposal(
-    proposal.id,
-    "AWAITING_LOCAL",
-    "LOCALLY_APPROVED",
-    nowMs + 2
-  );
-  database.recordLocalApproval({
-    proposalId: proposal.id,
-    proposalHash: proposal.hash,
-    approvedAtMs: nowMs + 2,
-    expiresAtMs: proposal.expiresAtMs,
-    nonceHash: `nonce-${orderId}`,
-    consumedAtMs: null
-  });
-  expect(database.claimExecution(proposal.id, proposal.hash, nowMs + 3)).toBe(
-    true
-  );
+  expect(
+    database.claimAutonomousExecution(proposal.id, proposal.hash, session.id, nowMs + 1)
+  ).toBe(true);
   database.markExecutionSubmitted({
     proposalId: proposal.id,
     proposalHash: proposal.hash,

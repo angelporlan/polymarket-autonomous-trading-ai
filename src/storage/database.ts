@@ -5,7 +5,6 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type {
   ExecutionRecord,
   ExecutionMode,
-  LocalApproval,
   OrderProposal,
   PaperTrade,
   PositionRecord,
@@ -36,15 +35,6 @@ interface ProposalRow {
   payload_json: string;
 }
 
-interface ApprovalRow {
-  proposal_id: string;
-  proposal_hash: string;
-  approved_at_ms: number;
-  expires_at_ms: number;
-  nonce_hash: string;
-  consumed_at_ms: number | null;
-}
-
 interface ExecutionRow {
   proposal_id: string;
   proposal_hash: string;
@@ -60,8 +50,6 @@ interface StateRow {
 
 const ACTIVE_EXIT_RESERVATION_STATUSES = new Set([
   "STAGED",
-  "AWAITING_LOCAL",
-  "LOCALLY_APPROVED",
   "EXECUTING",
   "SUBMITTED"
 ]);
@@ -119,7 +107,7 @@ export class TradingDatabase {
     this.getProposalStatement = this.db.prepare(
       "SELECT payload_json FROM proposals WHERE id = ?"
     );
-    this.expireInterruptedApprovals(Date.now());
+    this.expireInterruptedExecutions(Date.now());
   }
 
   close(): void {
@@ -265,190 +253,6 @@ export class TradingDatabase {
     return updated;
   }
 
-  recordLocalApproval(approval: LocalApproval): void {
-    this.db
-      .prepare(
-        `INSERT INTO approvals
-          (proposal_id, proposal_hash, approved_at_ms, expires_at_ms, nonce_hash, consumed_at_ms)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(proposal_id) DO UPDATE SET
-           proposal_hash = excluded.proposal_hash,
-           approved_at_ms = excluded.approved_at_ms,
-           expires_at_ms = excluded.expires_at_ms,
-           nonce_hash = excluded.nonce_hash,
-           consumed_at_ms = NULL`
-      )
-      .run(
-        approval.proposalId,
-        approval.proposalHash,
-        approval.approvedAtMs,
-        approval.expiresAtMs,
-        approval.nonceHash,
-        approval.consumedAtMs
-      );
-    this.appendAudit("LOCAL_APPROVAL_RECORDED", approval.proposalId, {
-      proposalHash: approval.proposalHash,
-      approvedAtMs: approval.approvedAtMs,
-      expiresAtMs: approval.expiresAtMs
-    });
-  }
-
-  getLocalApproval(proposalId: string): LocalApproval | null {
-    const row = this.db
-      .prepare("SELECT * FROM approvals WHERE proposal_id = ?")
-      .get(proposalId) as ApprovalRow | undefined;
-    if (!row) {
-      return null;
-    }
-    return {
-      proposalId: row.proposal_id,
-      proposalHash: row.proposal_hash,
-      approvedAtMs: row.approved_at_ms,
-      expiresAtMs: row.expires_at_ms,
-      nonceHash: row.nonce_hash,
-      consumedAtMs: row.consumed_at_ms
-    };
-  }
-
-  consumeLocalApproval(
-    proposalId: string,
-    proposalHash: string,
-    nowMs: number
-  ): boolean {
-    const result = this.db
-      .prepare(
-        `UPDATE approvals
-         SET consumed_at_ms = ?
-         WHERE proposal_id = ?
-           AND proposal_hash = ?
-           AND consumed_at_ms IS NULL
-           AND expires_at_ms >= ?`
-      )
-      .run(nowMs, proposalId, proposalHash, nowMs);
-    if (result.changes === 1) {
-      this.appendAudit("LOCAL_APPROVAL_CONSUMED", proposalId, {
-        proposalHash,
-        consumedAtMs: nowMs
-      });
-      return true;
-    }
-    return false;
-  }
-
-  claimExecution(proposalId: string, proposalHash: string, nowMs: number): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const proposal = this.getProposal(proposalId);
-      const approval = this.getLocalApproval(proposalId);
-      if (
-        !proposal ||
-        proposal.hash !== proposalHash ||
-        proposal.status !== "LOCALLY_APPROVED" ||
-        proposal.expiresAtMs < nowMs ||
-        proposal.policyVersion !== RISK_POLICY_VERSION ||
-        !verifyProposalHash(proposal) ||
-        !approval ||
-        approval.proposalHash !== proposalHash ||
-        approval.expiresAtMs < nowMs ||
-        approval.consumedAtMs !== null
-      ) {
-        this.db.exec("ROLLBACK");
-        return false;
-      }
-
-      if (proposal.executionMode === "live" && proposal.intent === "ENTRY") {
-        if (proposal.sessionId === null) {
-          this.db.exec("ROLLBACK");
-          return false;
-        }
-        const sessionRow = this.db
-          .prepare(
-            "SELECT payload_json FROM trading_sessions WHERE id = ? AND status = 'ACTIVE'"
-          )
-          .get(proposal.sessionId) as ProposalRow | undefined;
-        if (!sessionRow) {
-          this.db.exec("ROLLBACK");
-          return false;
-        }
-        const session = parseWithBigInts<TradingSession>(sessionRow.payload_json);
-        if (
-          session.executionMode !== "live" ||
-          nowMs >= session.expiresAtMs ||
-          session.remainingBudgetMicros < proposal.maxLossMicros
-        ) {
-          this.db.exec("ROLLBACK");
-          return false;
-        }
-        const remainingBudgetMicros =
-          session.remainingBudgetMicros - proposal.maxLossMicros;
-        const updatedSession: TradingSession = {
-          ...session,
-          remainingBudgetMicros,
-          status: remainingBudgetMicros === 0n ? "EXHAUSTED" : "ACTIVE"
-        };
-        const sessionUpdate = this.db
-          .prepare(
-            `UPDATE trading_sessions
-             SET status = ?, payload_json = ?
-             WHERE id = ? AND status = 'ACTIVE'`
-          )
-          .run(
-            updatedSession.status,
-            stringifyWithBigInts(updatedSession),
-            proposal.sessionId
-          );
-        if (sessionUpdate.changes !== 1) {
-          this.db.exec("ROLLBACK");
-          return false;
-        }
-      }
-
-      const consumed = this.db
-        .prepare(
-          `UPDATE approvals SET consumed_at_ms = ?
-           WHERE proposal_id = ? AND proposal_hash = ? AND consumed_at_ms IS NULL`
-        )
-        .run(nowMs, proposalId, proposalHash);
-      const transitioned = this.db
-        .prepare(
-          `UPDATE proposals
-           SET status = 'EXECUTING',
-               payload_json = ?,
-               revision = revision + 1,
-               updated_at_ms = ?
-           WHERE id = ? AND hash = ? AND status = 'LOCALLY_APPROVED'`
-        )
-        .run(
-          stringifyWithBigInts({ ...proposal, status: "EXECUTING" }),
-          nowMs,
-          proposalId,
-          proposalHash
-        );
-      const execution = this.db
-        .prepare(
-          `INSERT OR IGNORE INTO executions
-            (proposal_id, proposal_hash, clob_order_id, status, submitted_at_ms, response_json)
-           VALUES (?, ?, NULL, 'CLAIMED', ?, '{}')`
-        )
-        .run(proposalId, proposalHash, nowMs);
-
-      if (consumed.changes !== 1 || transitioned.changes !== 1 || execution.changes !== 1) {
-        this.db.exec("ROLLBACK");
-        return false;
-      }
-
-      this.appendAudit("EXECUTION_CLAIMED", proposalId, {
-        proposalHash,
-        claimedAtMs: nowMs
-      });
-      this.db.exec("COMMIT");
-      return true;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
   markExecutionSubmitted(record: ExecutionRecord): void {
     if (
       record.clobOrderId === null ||
@@ -518,7 +322,7 @@ export class TradingDatabase {
                payload_json = json_set(payload_json, '$.status', 'REJECTED'),
                revision = revision + 1,
                updated_at_ms = ?
-           WHERE id = ? AND hash = ? AND (status = 'STAGED' OR status = 'AWAITING_LOCAL' OR status = 'LOCALLY_APPROVED' OR status = 'EXECUTING')`
+           WHERE id = ? AND hash = ? AND (status = 'STAGED' OR status = 'EXECUTING')`
         )
         .run(Date.now(), proposalId, proposalHash);
       this.db
@@ -1542,6 +1346,15 @@ export class TradingDatabase {
     return row ? parseWithBigInts<ResearchBundle>(row.payload_json) : null;
   }
 
+  listResearchBundles(): ResearchBundle[] {
+    const rows = this.db
+      .prepare(
+        "SELECT payload_json FROM research_bundles ORDER BY created_at_ms DESC"
+      )
+      .all() as unknown as ProposalRow[];
+    return rows.map((row) => parseWithBigInts<ResearchBundle>(row.payload_json));
+  }
+
   getPositionRecord(tokenId: string): PositionRecord | null {
     const row = this.db
       .prepare("SELECT payload_json FROM position_records WHERE token_id = ?")
@@ -1840,11 +1653,11 @@ export class TradingDatabase {
     return true;
   }
 
-  private expireInterruptedApprovals(nowMs: number): void {
+  private expireInterruptedExecutions(nowMs: number): void {
     const interrupted = this.db
       .prepare(
         `SELECT id FROM proposals
-         WHERE status IN ('AWAITING_LOCAL', 'LOCALLY_APPROVED', 'EXECUTING')`
+         WHERE status = 'EXECUTING'`
       )
       .all() as Array<{ id: string }>;
     this.db
@@ -1854,11 +1667,11 @@ export class TradingDatabase {
              payload_json = json_set(payload_json, '$.status', 'EXPIRED'),
              revision = revision + 1,
              updated_at_ms = ?
-         WHERE status IN ('AWAITING_LOCAL', 'LOCALLY_APPROVED', 'EXECUTING')`
+         WHERE status = 'EXECUTING'`
       )
       .run(nowMs);
     for (const row of interrupted) {
-      this.appendAudit("INTERRUPTED_APPROVAL_EXPIRED", row.id, { expiredAtMs: nowMs });
+      this.appendAudit("INTERRUPTED_EXECUTION_EXPIRED", row.id, { expiredAtMs: nowMs });
     }
   }
 
@@ -1907,15 +1720,6 @@ export class TradingDatabase {
         expires_at_ms INTEGER NOT NULL,
         revision INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS approvals (
-        proposal_id TEXT PRIMARY KEY REFERENCES proposals(id),
-        proposal_hash TEXT NOT NULL,
-        approved_at_ms INTEGER NOT NULL,
-        expires_at_ms INTEGER NOT NULL,
-        nonce_hash TEXT NOT NULL,
-        consumed_at_ms INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS executions (

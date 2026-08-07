@@ -1,11 +1,8 @@
-import {
-  request as httpRequest
-} from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { ApprovalHttpServer } from "../src/approval/server.js";
+import { DashboardHttpServer } from "../src/approval/server.js";
 import { TradingDatabase } from "../src/storage/database.js";
 
-const servers: ApprovalHttpServer[] = [];
+const servers: DashboardHttpServer[] = [];
 const databases: TradingDatabase[] = [];
 let nextPort = 20_000 + (process.pid % 20_000);
 
@@ -20,7 +17,7 @@ async function createHarness() {
   const database = new TradingDatabase(":memory:");
   databases.push(database);
   const port = nextPort++;
-  const server = new ApprovalHttpServer({
+  const server = new DashboardHttpServer({
     host: "127.0.0.1",
     port,
     database
@@ -49,6 +46,20 @@ describe("DashboardHttpServer (Read-Only Monitoring)", () => {
     const json = (await jsonRes.json()) as Record<string, unknown>;
     expect(json.status).toBeDefined();
     expect(json.openPositionsCount).toBe(0);
+    expect(json.positions).toEqual([]);
+    expect(json.researchBundles).toEqual([]);
+    expect(json.orders).toEqual([]);
+    expect(json.pnl).toMatchObject({
+      paper: {
+        realizedPusd: "0",
+        feesPusd: "0",
+        netPusd: "0",
+        openTrades: 0
+      },
+      live: { known: false, source: "remote_reconciliation" }
+    });
+    expect(json.locks).toBeDefined();
+    expect(json.lastReconciliation).toBeNull();
   });
 
   it("blocks POST requests as Method Not Allowed in read-only mode", async () => {

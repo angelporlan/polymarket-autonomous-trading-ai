@@ -166,7 +166,7 @@ export const orderProposalSchema = z
   .object({
     proposalId: proposalIdSchema,
     proposalHash: proposalHashSchema,
-    status: z.enum(["STAGED", "SIMULATED", "AWAITING_LOCAL"]),
+    status: z.enum(["STAGED", "SIMULATED"]),
     intent: orderIntentSchema,
     executionMode: z.enum(["paper", "live"]),
     createdAt: timestampSchema,

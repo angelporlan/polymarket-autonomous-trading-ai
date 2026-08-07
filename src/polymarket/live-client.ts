@@ -191,7 +191,7 @@ export class PolymarketLiveClient {
     this.signedOrderHashEvidence = options.signedOrderHashEvidence;
   }
 
-  async executeApprovedProposal(
+  async executeStagedProposal(
     proposal: OrderProposal
   ): Promise<SubmittedOrder> {
     this.assertProposalCanExecute(proposal);
@@ -488,11 +488,11 @@ export class PolymarketLiveClient {
         }
       );
     }
-    if (proposal.status !== "LOCALLY_APPROVED") {
+    if (proposal.status !== "EXECUTING") {
       throw new SafeExternalServiceError(
-        "The proposal has not received local approval.",
+        "The proposal has not been claimed for autonomous execution.",
         {
-          code: "LOCAL_APPROVAL_REQUIRED",
+          code: "AUTONOMOUS_EXECUTION_REQUIRED",
           service: "local",
           retryable: false
         }
@@ -500,7 +500,7 @@ export class PolymarketLiveClient {
     }
     if (!verifyProposalHash(proposal)) {
       throw new SafeExternalServiceError(
-        "The approved proposal hash does not match its immutable contents.",
+        "The staged proposal hash does not match its immutable contents.",
         {
           code: "PROPOSAL_HASH_MISMATCH",
           service: "local",

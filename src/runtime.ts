@@ -140,7 +140,7 @@ export class PolymarketRuntime {
   private readonly keychainHelperAvailable: boolean;
   private readonly paperGate: PaperGatePort;
   private readonly liveTrading: GuardedLiveTradingAdapter | null;
-  private readonly approvalServer: DashboardHttpServer;
+  private readonly dashboardServer: DashboardHttpServer;
   private readonly service: TradingService;
   private readonly researchVerifier: ResearchVerifier;
   private closed = false;
@@ -183,7 +183,7 @@ export class PolymarketRuntime {
           });
 
     this.lockAfterUnsafeRestart();
-    this.approvalServer = new DashboardHttpServer({
+    this.dashboardServer = new DashboardHttpServer({
       host: this.config.approvalHost,
       port: this.config.approvalPort,
       database: this.database
@@ -207,9 +207,15 @@ export class PolymarketRuntime {
       onchainSettlement: new PolygonReceiptVerifier({
         rpcUrls: this.config.polygonRpcUrls
       }),
-      approvals: this.approvalServer
     });
     this.service = service;
+  }
+
+  async startDashboard(): Promise<void> {
+    if (this.closed) {
+      throw new Error("RUNTIME_CLOSED");
+    }
+    await this.dashboardServer.start();
   }
 
   async getAccountStatus(): Promise<GetAccountStatusOutput> {
@@ -716,7 +722,7 @@ export class PolymarketRuntime {
 
     if (
       proposal !== null &&
-      (proposal.status === "STAGED" || proposal.status === "AWAITING_LOCAL")
+      proposal.status === "STAGED"
     ) {
       const cancelled = this.database.transitionProposal(
         proposal.id,
@@ -811,12 +817,12 @@ export class PolymarketRuntime {
       return;
     }
     this.closed = true;
-    // Stop future gates and signing synchronously. The approval server is then
+    // Stop future gates and signing synchronously. The dashboard is then
     // drained so an already accepted callback cannot claim an execution after
     // the final ledger check.
     this.database.setLiveActivation(false);
     this.liveTrading?.beginShutdown();
-    await this.approvalServer.stop();
+    await this.dashboardServer.stop();
 
     if (this.hasUnreconciledLiveExecution()) {
       this.database.setEmergencyStop(
@@ -911,6 +917,7 @@ export class PolymarketRuntime {
 export async function createMcpToolDependencies(): Promise<McpToolDependencies> {
   const runtime = new PolymarketRuntime();
   return {
+    start: () => runtime.startDashboard(),
     getAccountStatus: () => guarded(() => runtime.getAccountStatus()),
     getPortfolio: () => guarded(() => runtime.getPortfolio()),
     scanCandidates: (input) => guarded(() => runtime.scanCandidates(input)),
@@ -1087,9 +1094,7 @@ function proposalOutput(proposal: OrderProposal): StageOrderOutput {
     status:
       proposal.status === "SIMULATED"
         ? "SIMULATED"
-        : proposal.status === "AWAITING_LOCAL"
-          ? "AWAITING_LOCAL"
-          : "STAGED",
+        : "STAGED",
     executionMode: proposal.executionMode,
     intent: proposal.intent,
     sessionId: proposal.sessionId,
