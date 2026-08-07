@@ -75,6 +75,10 @@ import {
 import { parseWithBigInts } from "./storage/codec.js";
 import { TradingDatabase } from "./storage/database.js";
 import { ResearchVerifier } from "./research/verifier.js";
+import type {
+  SupervisorCycleResult,
+  SupervisorHeartbeat
+} from "./supervisor/types.js";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const TERMINAL_PROPOSAL_STATUSES = new Set([
@@ -509,6 +513,52 @@ export class PolymarketRuntime {
       })),
       evaluatedAt: new Date().toISOString()
     };
+  }
+
+  /**
+   * Narrow entry point for the detached risk-reduction daemon. It deliberately
+   * has no session creation, entry staging, or arbitrary signing capability.
+   */
+  async runSupervisorCycle(): Promise<SupervisorCycleResult> {
+    this.requireProfile();
+    const reconciliationActive = this.config.liveEnabled
+      ? await this.service.monitorLiveSafety()
+      : false;
+    const result = await this.service.supervisePositions();
+    const priorityReevaluation = result.actions.some(
+      (action) => action.triggerReason === "RESEARCH_REQUIRED"
+    );
+    return {
+      evaluatedPositionsCount: result.actions.length,
+      actions: result.actions.map((action) => ({
+        tokenId: action.tokenId,
+        conditionId: action.conditionId,
+        question: action.question,
+        shouldExit: action.shouldExit,
+        triggerReason: action.triggerReason,
+        explanation: action.explanation,
+        recommendedOrderSide: action.recommendedOrderSide
+      })),
+      evaluatedAt: new Date().toISOString(),
+      reconciliationActive,
+      priorityReevaluation
+    };
+  }
+
+  saveSupervisorHeartbeat(heartbeat: SupervisorHeartbeat): void {
+    this.database.saveSupervisorHeartbeat(heartbeat);
+  }
+
+  getSupervisorHeartbeat(): SupervisorHeartbeat | null {
+    return this.database.getSupervisorHeartbeat();
+  }
+
+  async failSafeSupervisor(): Promise<void> {
+    const reason = "SUPERVISOR_CYCLE_FAILED";
+    this.database.setEmergencyStop(true, reason);
+    if (this.config.liveEnabled && this.liveTrading !== null) {
+      await this.service.emergencyStop(reason);
+    }
   }
 
   async getOrderStatus(

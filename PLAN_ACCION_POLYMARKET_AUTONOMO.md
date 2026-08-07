@@ -680,6 +680,16 @@ Añadir a `package.json`:
 
 Cerrar Antigravity no detiene stop-loss, take-profit, reconciliación ni cancelación de riesgo.
 
+## Evidencia de completado
+
+- [x] `src/supervisor/main.ts` ejecuta el ciclo de reconciliación y reducción de riesgo en un proceso separado del MCP.
+- [x] El supervisor no crea sesiones, no prepara entradas y no expone una ruta de firma; solo invoca la reconciliación live y `EXIT` de `supervisePositions`.
+- [x] `SupervisorProcessLock` impide dos instancias y recupera locks cuyo PID ya no existe.
+- [x] El heartbeat se persiste en `system_state` con estado, PID, ciclo, fallos y próxima ejecución; no registra mensajes externos ni secretos.
+- [x] La cadencia es de 60 segundos en reposo, 5–15 segundos durante reconciliación activa o tras un movimiento que exige nueva investigación, y usa backoff con jitter ante fallos.
+- [x] `supervisor:install` genera un LaunchAgent sin variables de entorno ni credenciales y lo registra con `launchctl` en la sesión del usuario.
+- [x] Verificación: `npm run typecheck`, `npm run build` y `npm test` correctos (`28` archivos, `248` tests); `test/supervisor.test.ts` cubre lock, recuperación, cadencia, heartbeat y plist.
+
 ---
 
 # P8 — Importar posiciones heredadas

@@ -29,6 +29,7 @@ import {
   parseClobFixed6
 } from "../polymarket/reconciliation.js";
 import { parseWithBigInts, stringifyWithBigInts } from "./codec.js";
+import type { SupervisorHeartbeat } from "../supervisor/types.js";
 
 interface ProposalRow {
   payload_json: string;
@@ -575,6 +576,29 @@ export class TradingDatabase {
       submittedAtMs: row.submitted_at_ms,
       responseJson: row.response_json
     }));
+  }
+
+  saveSupervisorHeartbeat(
+    heartbeat: SupervisorHeartbeat,
+    nowMs = Date.now()
+  ): void {
+    this.setState("supervisor_heartbeat", JSON.stringify(heartbeat), nowMs);
+  }
+
+  getSupervisorHeartbeat(): SupervisorHeartbeat | null {
+    const value = this.getState("supervisor_heartbeat");
+    if (value === null) {
+      return null;
+    }
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (!isSupervisorHeartbeat(parsed)) {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
   }
 
   updateExecutionStatus(
@@ -1989,6 +2013,34 @@ function normalizeAddress(value: string): string {
     throw new Error("Invalid EVM address.");
   }
   return value.toLowerCase();
+}
+
+function isSupervisorHeartbeat(value: unknown): value is SupervisorHeartbeat {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const validTimestamp = (candidate: unknown): candidate is number =>
+    candidate === null ||
+    (typeof candidate === "number" && Number.isFinite(candidate));
+  return (
+    Number.isSafeInteger(record.pid) &&
+    typeof record.startedAtMs === "number" &&
+    Number.isFinite(record.startedAtMs) &&
+    (record.status === "STARTING" ||
+      record.status === "HEALTHY" ||
+      record.status === "DEGRADED" ||
+      record.status === "STOPPING") &&
+    validTimestamp(record.lastCycleAtMs) &&
+    validTimestamp(record.lastSuccessAtMs) &&
+    validTimestamp(record.nextCycleAtMs) &&
+    Number.isSafeInteger(record.consecutiveFailures) &&
+    (record.consecutiveFailures as number) >= 0 &&
+    typeof record.reconciliationActive === "boolean" &&
+    (record.lastErrorCode === null ||
+      (typeof record.lastErrorCode === "string" &&
+        record.lastErrorCode.length <= 128))
+  );
 }
 
 function readRecord(value: unknown): Record<string, unknown> {
