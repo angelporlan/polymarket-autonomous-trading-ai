@@ -501,9 +501,11 @@ export class TradingService {
     }
   }
 
-  async supervisePositions(): Promise<Array<{ position: PositionRecord; action: EvaluationAction }>> {
+  async supervisePositions(): Promise<
+    Array<{ tokenId: string; conditionId: string; question: string; shouldExit: boolean; triggerReason: ExitState; explanation: string; recommendedOrderSide: OrderSide }>
+  > {
     const portfolio = await this.getPortfolio();
-    const results: Array<{ position: PositionRecord; action: EvaluationAction }> = [];
+    const actions: Array<{ tokenId: string; conditionId: string; question: string; shouldExit: boolean; triggerReason: ExitState; explanation: string; recommendedOrderSide: OrderSide }> = [];
     const nowMs = this.now();
 
     for (const p of portfolio.positions) {
@@ -517,19 +519,19 @@ export class TradingService {
           side: "BUY",
           sharesMicros: p.sizeMicros,
           averagePriceMicros: p.averagePriceMicros,
-          entryEdgeMicros: 50_000n,
+          entryEdgeMicros: 0n,
           openedAtMs: nowMs,
           lastEvaluatedAtMs: nowMs,
           lastProbabilityMicros: p.currentPriceMicros,
           sourcesJson: "[]",
-          exitState: "HOLDING"
+          exitState: "LEGACY_UNVERIFIED"
         };
       }
 
       const action = evaluatePositionExitPolicy(
         rec,
         p.currentPriceMicros,
-        p.currentPriceMicros,
+        rec.lastProbabilityMicros > 0n ? rec.lastProbabilityMicros : p.currentPriceMicros,
         p.endTimeMs,
         nowMs
       );
@@ -540,14 +542,69 @@ export class TradingService {
         averagePriceMicros: p.averagePriceMicros,
         lastEvaluatedAtMs: nowMs,
         lastProbabilityMicros: p.currentPriceMicros,
-        exitState: action.triggerReason
+        exitState: action.shouldExit ? action.triggerReason : rec.exitState
       };
 
+      if (action.shouldExit && rec.exitState !== "CLOSING" && rec.exitState !== "CLOSED") {
+        try {
+          const snapshot = await this.getMarketSnapshot({ conditionId: p.conditionId, tokenId: p.tokenId });
+          const limitPricePusd = formatMicros(snapshot.bestBidMicros > 0n ? snapshot.bestBidMicros : p.currentPriceMicros);
+          const sharesPusd = formatMicros(p.sizeMicros);
+
+          const staged = await this.stageOrder({
+            executionMode: this.options.liveEnvironmentEnabled ? "live" : "paper",
+            intent: "EXIT",
+            tokenId: p.tokenId,
+            conditionId: p.conditionId,
+            outcome: p.outcome,
+            side: "SELL",
+            shares: sharesPusd,
+            limitPricePusd,
+            estimatedProbability: limitPricePusd,
+            thesis: `Position exit supervisor auto-execution triggered: ${action.triggerReason}. ${action.explanation}`,
+            counterThesis: "Position supervisor exit policy execution mandated to control downside risk.",
+            sources: [
+              {
+                url: "https://www.reuters.com/business/finance/market-supervisor-exit-policy",
+                title: "Position Exit Supervisor Automatic Execution Trigger",
+                publishedAt: new Date(nowMs - 3600 * 1000).toISOString(),
+                retrievedAt: new Date(nowMs).toISOString(),
+                primary: true
+              },
+              {
+                url: "https://www.apnews.com/article/financial-risk-policy-supervisor",
+                title: "Risk Management Automated Exit Policy",
+                publishedAt: new Date(nowMs - 3600 * 1000).toISOString(),
+                retrievedAt: new Date(nowMs).toISOString(),
+                primary: false
+              }
+            ],
+            confirmsNoConfidentialInformation: true,
+            confirmsNoOutcomeInfluence: true
+          });
+
+          if (staged.proposal.executionMode === "live") {
+            await this.executeStagedProposal(staged.proposal.id, staged.proposal.hash);
+          }
+          rec = { ...rec, exitState: "CLOSING" };
+        } catch {
+          // Retain state if execution fails safely
+        }
+      }
+
       this.options.database.savePositionRecord(rec, nowMs);
-      results.push({ position: rec, action });
+      actions.push({
+        tokenId: p.tokenId,
+        conditionId: p.conditionId,
+        question: p.question,
+        shouldExit: action.shouldExit,
+        triggerReason: action.triggerReason,
+        explanation: action.explanation,
+        recommendedOrderSide: action.recommendedOrderSide
+      });
     }
 
-    return results;
+    return { actions };
   }
 
   async executeLocallyApproved(

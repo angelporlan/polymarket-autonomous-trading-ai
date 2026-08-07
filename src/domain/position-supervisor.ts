@@ -22,12 +22,22 @@ export function evaluatePositionExitPolicy(
 ): EvaluationAction {
   const recommendedOrderSide: OrderSide = position.side === "BUY" ? "SELL" : "BUY";
 
-  // Check 1: Resolution urgency (less than 24h to market end)
+  // Check 0: Legacy unverified position
+  if (position.exitState === "LEGACY_UNVERIFIED") {
+    return {
+      shouldExit: false,
+      triggerReason: "LEGACY_UNVERIFIED",
+      explanation: "Position lacks verified local entry evidence; manual verification required.",
+      recommendedOrderSide
+    };
+  }
+
+  // Check 1: Resolution urgency (less than 24h to market end) -> Hold until resolution
   if (marketEndTimeMs - nowMs <= RESOLUTION_URGENCY_WINDOW_MS) {
     return {
-      shouldExit: true,
-      triggerReason: "MAX_DURATION_EXPIRED",
-      explanation: "Market resolves in less than 24 hours; executing position exit policy.",
+      shouldExit: false,
+      triggerReason: "HOLD_UNTIL_RESOLUTION",
+      explanation: "Market ends in less than 24 hours; holding position until native market resolution.",
       recommendedOrderSide
     };
   }
@@ -53,8 +63,6 @@ export function evaluatePositionExitPolicy(
 
   // Calculate return %
   const priceDiff = currentPriceMicros - position.averagePriceMicros;
-  // For BUY, PnL ratio = (currentPrice - avgPrice) / avgPrice
-  // For SELL, PnL ratio = (avgPrice - currentPrice) / avgPrice
   const pnlRatio =
     position.side === "BUY"
       ? Number(priceDiff) / Number(position.averagePriceMicros)
@@ -80,11 +88,18 @@ export function evaluatePositionExitPolicy(
     };
   }
 
-  // Check 5: Edge disappearance
+  // Check 5: Edge disappearance (use evaluated probability or stored edge, not currentPrice)
+  const evaluatedProb =
+    currentProbabilityMicros > 0n && currentProbabilityMicros !== currentPriceMicros
+      ? currentProbabilityMicros
+      : position.lastProbabilityMicros > 0n
+        ? position.lastProbabilityMicros
+        : position.averagePriceMicros + position.entryEdgeMicros;
+
   const grossEdgeMicros =
     position.side === "BUY"
-      ? currentProbabilityMicros - currentPriceMicros
-      : currentPriceMicros - currentProbabilityMicros;
+      ? evaluatedProb - currentPriceMicros
+      : currentPriceMicros - evaluatedProb;
 
   if (grossEdgeMicros <= 0n) {
     return {
