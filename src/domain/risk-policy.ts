@@ -173,7 +173,9 @@ export function evaluateOrderRisk(
     });
   }
 
-  if (market.endTimeMs - context.nowMs <= policy.minTimeToCloseMs) {
+  const isExit = intent.intent === "EXIT";
+
+  if (!isExit && market.endTimeMs - context.nowMs <= policy.minTimeToCloseMs) {
     violations.push({
       code: "CLOSE_TOO_SOON",
       message: "The market closes in 24 hours or less."
@@ -213,7 +215,7 @@ export function evaluateOrderRisk(
     });
   }
 
-  if (orderRiskMicros > maxOrderMicros) {
+  if (!isExit && orderRiskMicros > maxOrderMicros) {
     violations.push({
       code: "ORDER_TOO_LARGE",
       message: "The order exceeds the current canary or pilot per-order limit."
@@ -221,8 +223,9 @@ export function evaluateOrderRisk(
   }
 
   if (
-    postTradeMarketExposureMicros > policy.maxMarketOrCorrelationMicros ||
-    postTradeCorrelationExposureMicros > policy.maxMarketOrCorrelationMicros
+    !isExit &&
+    (postTradeMarketExposureMicros > policy.maxMarketOrCorrelationMicros ||
+      postTradeCorrelationExposureMicros > policy.maxMarketOrCorrelationMicros)
   ) {
     violations.push({
       code: "MARKET_EXPOSURE",
@@ -230,14 +233,14 @@ export function evaluateOrderRisk(
     });
   }
 
-  if (postTradeTotalExposureMicros > maxOpenExposureMicros) {
+  if (!isExit && postTradeTotalExposureMicros > maxOpenExposureMicros) {
     violations.push({
       code: "TOTAL_EXPOSURE",
       message: "Total open exposure would exceed the current canary or pilot limit."
     });
   }
 
-  if (postTradeTotalExposureMicros > RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD) {
+  if (!isExit && postTradeTotalExposureMicros > RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD) {
     violations.push({
       code: "HARD_CEILING_EXCEEDED",
       message: `Total open exposure would exceed hard ceiling of ${RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD / PUSD_SCALE} pUSD.`
@@ -252,6 +255,7 @@ export function evaluateOrderRisk(
   }
 
   if (
+    !isExit &&
     intent.side === "BUY" &&
     context.marketExposureMicros === 0n &&
     context.openMarketCount >= policy.maxOpenMarkets
@@ -294,7 +298,7 @@ export function evaluateOrderRisk(
     });
   }
 
-  if (expectedEdgeMicros < policy.minEdgeMicros) {
+  if (!isExit && expectedEdgeMicros < policy.minEdgeMicros) {
     violations.push({
       code: "EDGE_TOO_SMALL",
       message: "Expected edge is below five percentage points."
@@ -308,7 +312,7 @@ export function evaluateOrderRisk(
     });
   }
 
-  if (market.depthPusdMicrosAtLimit < orderRiskMicros * policy.depthMultiplier) {
+  if (!isExit && market.depthPusdMicrosAtLimit < orderRiskMicros * policy.depthMultiplier) {
     violations.push({
       code: "INSUFFICIENT_DEPTH",
       message: "Depth at the approved limit is less than five times the order risk."
