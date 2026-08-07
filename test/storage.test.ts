@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createOrderProposal } from "../src/domain/proposals.js";
 import { createTradingSession } from "../src/domain/session.js";
@@ -40,6 +43,54 @@ describe("TradingDatabase", () => {
       reason: "test"
     });
     database.close();
+  });
+
+  it("keeps an interrupted autonomous claim blocking after restart", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "polymarket-restart-lock-"));
+    const filename = path.join(directory, "trading.sqlite");
+    try {
+      const first = new TradingDatabase(filename);
+      const now = Date.now();
+      const session = createTradingSession({
+        executionMode: "live",
+        authorizedBudgetMicros: 10n * 1_000_000n,
+        nowMs: now
+      });
+      first.saveTradingSession(session);
+      const intent = intentFixture(now);
+      intent.executionMode = "live";
+      intent.sessionId = session.id;
+      const proposal = createOrderProposal(intent, riskContextFixture(now));
+      first.stageProposal(proposal);
+      expect(
+        first.claimAutonomousExecution(
+          proposal.id,
+          proposal.hash,
+          session.id,
+          now + 1
+        )
+      ).toBe(true);
+      first.close();
+
+      const restarted = new TradingDatabase(filename);
+      expect(restarted.getProposal(proposal.id)?.status).toBe("EXPIRED");
+      expect(restarted.getExecution(proposal.id)?.status).toBe("CLAIMED");
+      expect(
+        restarted.claimAutonomousExecution(
+          proposal.id,
+          proposal.hash,
+          session.id,
+          now + 2
+        )
+      ).toBe(false);
+      expect(
+        restarted.countAuditEvents("INTERRUPTED_EXECUTION_EXPIRED")
+      ).toBe(1);
+      expect(restarted.verifyAuditChain()).toBe(true);
+      restarted.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("promotes the canary only with reconciled confirmed fills after baseline", () => {

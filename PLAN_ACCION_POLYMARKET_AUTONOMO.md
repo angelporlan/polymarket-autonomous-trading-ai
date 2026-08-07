@@ -863,6 +863,17 @@ superficie de autorización.
 - [ ] Timeout tras POST incierto → no reenvía; primero reconcilia.
 - [ ] La misma propuesta nunca produce dos órdenes CLOB.
 
+## Evidencia acumulada
+
+- [x] `test/session.test.ts`, `test/session-binding.test.ts`, `test/onboarding.test.ts` y `test/risk-context.test.ts` cubren challenge de un solo uso, expiración, presupuesto no ampliable, binding de sesión, presupuesto insuficiente, salidas sin consumo de presupuesto de entrada y reinicio entre sesiones.
+- [x] `test/domain.test.ts`, `test/risk-hard-ceiling.test.ts`, `test/polymarket-client.test.ts` y `test/live-reconciliation.test.ts` cubren hash inmutable, límites, fees, GTD, sanitización, fills y reconciliación sin credenciales ni endpoints productivos.
+- [x] `test/exit-reservation.test.ts`, `test/position-supervisor.test.ts`, `test/paper-reconciler.test.ts` y `test/paper-simulation-runner.test.ts` cubren reservas de salida, stops, take-profit, duración, resolución, fills parciales, PnL y errores de reconciliación.
+- [x] `test/session-binding.test.ts` cubre la reclamación de una propuesta una sola vez; `test/storage.test.ts` añade la prueba explícita de reinicio durante `EXECUTING`, conservando el execution `CLAIMED`, expirando la propuesta e impidiendo un reenvío.
+- [x] Verificación local: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `250` tests).
+- [x] `npm audit --audit-level=high` queda sin vulnerabilidades altas tras una actualización no forzada del lockfile. Permanecen dos moderadas del `@modelcontextprotocol/sdk@1.29.0` fijado y vulnerabilidades bajas transitivas, incluida `elliptic` sin fix disponible; no se ejecutó `npm audit fix --force`.
+- [x] Escaneo dirigido de secretos sobre código no generado, excluyendo fixtures sintéticos, no encontró claves privadas, frases semilla, credenciales L2, tokens Bearer ni claves API utilizables; `gitleaks` no está instalado en el entorno.
+- [ ] El soak paper de 14 días y el shadow live de 7 días aún requieren ejecución operativa sostenida; no se declaran completados por pruebas unitarias.
+
 ## CI
 
 Añadir etapas:
