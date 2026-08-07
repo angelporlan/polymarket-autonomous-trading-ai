@@ -6,7 +6,7 @@ import type {
 } from "./application/ports.js";
 import { DatabaseRiskContext } from "./application/risk-context.js";
 import { TradingService } from "./application/trading-service.js";
-import { ApprovalHttpServer } from "./approval/server.js";
+import { DashboardHttpServer } from "./approval/server.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { ProposalRejectedError } from "./domain/proposals.js";
 import { DEFAULT_RISK_POLICY, RISK_POLICY_VERSION } from "./domain/risk-policy.js";
@@ -32,6 +32,8 @@ import type {
   CancelOrderOutput,
   EmergencyStopInput,
   EmergencyStopOutput,
+  EndTradingSessionInput,
+  EndTradingSessionOutput,
   ExecuteStagedOrderInput,
   ExecuteStagedOrderOutput,
   GetAccountStatusOutput,
@@ -41,10 +43,16 @@ import type {
   GetOrderStatusOutput,
   GetPortfolioOutput,
   GetRiskStatusOutput,
+  GetSessionStatusInput,
+  GetSessionStatusOutput,
   ScanCandidatesInput,
   ScanCandidatesOutput,
   StageOrderInput,
-  StageOrderOutput
+  StageOrderOutput,
+  StartTradingSessionInput,
+  StartTradingSessionOutput,
+  SupervisePositionsInput,
+  SupervisePositionsOutput
 } from "./mcp/schemas.js";
 import { GuardedLiveTradingAdapter } from "./polymarket/live-adapter.js";
 import { PolygonReceiptVerifier } from "./polymarket/onchain-verifier.js";
@@ -118,7 +126,7 @@ export class PolymarketRuntime {
   private readonly keychainHelperAvailable: boolean;
   private readonly paperGate: PaperGatePort;
   private readonly liveTrading: GuardedLiveTradingAdapter | null;
-  private readonly approvalServer: ApprovalHttpServer;
+  private readonly approvalServer: DashboardHttpServer;
   private readonly service: TradingService;
   private closed = false;
 
@@ -159,11 +167,10 @@ export class PolymarketRuntime {
           });
 
     this.lockAfterUnsafeRestart();
-    this.approvalServer = new ApprovalHttpServer({
+    this.approvalServer = new DashboardHttpServer({
       host: this.config.approvalHost,
       port: this.config.approvalPort,
-      database: this.database,
-      onApproved: (proposal) => service.executeLocallyApproved(proposal)
+      database: this.database
     });
     const riskContexts = new DatabaseRiskContext({
       database: this.database,
@@ -442,7 +449,7 @@ export class PolymarketRuntime {
     return {
       sessionId: closedSession.id,
       closed: true,
-      closedAt: new Date(closedSession.closedAtMs ?? Date.now()).toISOString(),
+      closedAt: new Date(closedSession.closedAtMs).toISOString(),
       message: `Trading session ${closedSession.id} closed.`
     };
   }

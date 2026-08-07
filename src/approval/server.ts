@@ -26,6 +26,10 @@ export class DashboardHttpServer {
     this.now = options.now ?? Date.now;
   }
 
+  approvalUrl(_proposalId: string): string {
+    return `http://${this.options.host}:${this.options.port}/dashboard`;
+  }
+
   async start(): Promise<void> {
     if (this.server) {
       return;

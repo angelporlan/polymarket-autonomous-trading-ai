@@ -16,9 +16,11 @@ import {
   multiplyMicros,
   parseDecimalToMicros,
   PUSD_SCALE,
+  type ExitState,
   type MarketSnapshot,
   type OrderIntent,
   type OrderProposal,
+  type OrderSide,
   type PositionRecord,
   type PortfolioSnapshot,
   type UserTradeActivity
@@ -244,17 +246,14 @@ export class TradingService {
       authorizedBudgetMicros: effectiveAuthorizedBudget,
       nowMs
     });
-    this.options.database.saveTradingSession(session, nowMs);
+    this.options.database.saveTradingSession(session);
     return session;
   }
 
-  async closeTradingSession(sessionId: string, reason = "User closed session"): Promise<TradingSession> {
+  async closeTradingSession(sessionId: string, reason = "User closed session"): Promise<{ id: string; status: "CLOSED"; closedAtMs: number }> {
     const nowMs = this.now();
-    const session = this.options.database.closeTradingSession(sessionId, reason, nowMs);
-    if (!session) {
-      throw new Error(`Trading session ${sessionId} not found.`);
-    }
-    return session;
+    this.options.database.closeTradingSession(sessionId, reason, nowMs);
+    return { id: sessionId, status: "CLOSED", closedAtMs: nowMs };
   }
 
   getActiveTradingSession(executionMode: "live" | "paper"): TradingSession | null {
@@ -501,9 +500,9 @@ export class TradingService {
     }
   }
 
-  async supervisePositions(): Promise<
-    Array<{ tokenId: string; conditionId: string; question: string; shouldExit: boolean; triggerReason: ExitState; explanation: string; recommendedOrderSide: OrderSide }>
-  > {
+  async supervisePositions(): Promise<{
+    actions: Array<{ tokenId: string; conditionId: string; question: string; shouldExit: boolean; triggerReason: ExitState; explanation: string; recommendedOrderSide: OrderSide }>;
+  }> {
     const portfolio = await this.getPortfolio();
     const actions: Array<{ tokenId: string; conditionId: string; question: string; shouldExit: boolean; triggerReason: ExitState; explanation: string; recommendedOrderSide: OrderSide }> = [];
     const nowMs = this.now();
@@ -547,7 +546,7 @@ export class TradingService {
 
       if (action.shouldExit && rec.exitState !== "CLOSING" && rec.exitState !== "CLOSED") {
         try {
-          const snapshot = await this.getMarketSnapshot({ conditionId: p.conditionId, tokenId: p.tokenId });
+          const snapshot = await this.getMarketSnapshot({ conditionId: p.conditionId, tokenId: p.tokenId, outcome: p.outcome });
           const limitPricePusd = formatMicros(snapshot.bestBidMicros > 0n ? snapshot.bestBidMicros : p.currentPriceMicros);
           const sharesPusd = formatMicros(p.sizeMicros);
 
@@ -559,7 +558,7 @@ export class TradingService {
             outcome: p.outcome,
             side: "SELL",
             shares: sharesPusd,
-            limitPricePusd,
+            limitPrice: limitPricePusd,
             estimatedProbability: limitPricePusd,
             thesis: `Position exit supervisor auto-execution triggered: ${action.triggerReason}. ${action.explanation}`,
             counterThesis: "Position supervisor exit policy execution mandated to control downside risk.",
@@ -578,9 +577,7 @@ export class TradingService {
                 retrievedAt: new Date(nowMs).toISOString(),
                 primary: false
               }
-            ],
-            confirmsNoConfidentialInformation: true,
-            confirmsNoOutcomeInfluence: true
+            ]
           });
 
           if (staged.proposal.executionMode === "live") {
