@@ -5,7 +5,7 @@ export interface SourceValidationResult {
   violations: string[];
 }
 
-const FORBIDDEN_DOMAINS = new Set([
+export const FORBIDDEN_DOMAINS = new Set([
   "polymarket.com",
   "clob.polymarket.com",
   "gamma-api.polymarket.com",
@@ -27,7 +27,7 @@ export function extractRegistrableDomain(hostname: string): string {
   return parts.slice(-2).join(".");
 }
 
-const ALLOWED_ROOT_DOMAINS = new Set([
+export const ALLOWED_ROOT_DOMAINS = new Set([
   "reuters.com",
   "apnews.com",
   "bloomberg.com",
@@ -46,6 +46,21 @@ const ALLOWED_ROOT_DOMAINS = new Set([
 
 export const MAX_SOURCE_AGE_MS = 7 * 24 * 60 * 60 * 1_000; // 7 days max age
 export const CRISIS_SOURCE_AGE_MS = 48 * 60 * 60 * 1_000; // 48 hours max age for breaking crisis
+
+export function isRecognizedEvidenceDomain(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  const rootDomain = extractRegistrableDomain(host);
+  return (
+    !FORBIDDEN_DOMAINS.has(host) &&
+    !FORBIDDEN_DOMAINS.has(rootDomain) &&
+    !host.endsWith(".polymarket.com") &&
+    (ALLOWED_ROOT_DOMAINS.has(rootDomain) ||
+      rootDomain.endsWith(".gov") ||
+      rootDomain.endsWith(".edu") ||
+      rootDomain.endsWith(".eu") ||
+      rootDomain.endsWith(".org"))
+  );
+}
 
 export function validateEvidenceSources(
   sources: EvidenceSource[],
@@ -82,8 +97,8 @@ export function validateEvidenceSources(
       continue;
     }
 
-    if (urlObj.protocol !== "http:" && urlObj.protocol !== "https:") {
-      violations.push(`${label}: URL must use HTTP or HTTPS protocol.`);
+    if (urlObj.protocol !== "https:") {
+      violations.push(`${label}: URL must use HTTPS protocol.`);
     }
 
     const host = urlObj.hostname.toLowerCase();

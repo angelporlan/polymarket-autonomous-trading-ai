@@ -36,6 +36,8 @@ import {
   activateTradingSessionOutputSchema,
   prepareTradingSessionInputSchema,
   prepareTradingSessionOutputSchema,
+  prepareResearchBundleInputSchema,
+  prepareResearchBundleOutputSchema,
   supervisePositionsInputSchema,
   supervisePositionsOutputSchema,
   type CancelOrderInput,
@@ -66,6 +68,8 @@ import {
   type ActivateTradingSessionOutput,
   type PrepareTradingSessionInput,
   type PrepareTradingSessionOutput,
+  type PrepareResearchBundleInput,
+  type PrepareResearchBundleOutput,
   type SupervisePositionsInput,
   type SupervisePositionsOutput
 } from "./schemas.js";
@@ -87,6 +91,9 @@ export interface McpToolDependencies {
   prepareTradingSession(
     input: PrepareTradingSessionInput
   ): Awaitable<PrepareTradingSessionOutput>;
+  prepareResearchBundle(
+    input: PrepareResearchBundleInput
+  ): Awaitable<PrepareResearchBundleOutput>;
   activateTradingSession(
     input: ActivateTradingSessionInput
   ): Awaitable<ActivateTradingSessionOutput>;
@@ -337,6 +344,22 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
     (input) =>
       invokeStructured(supervisePositionsOutputSchema, () =>
         deps.supervisePositions(input)
+      )
+  );
+
+  server.registerTool(
+    "prepare_research_bundle",
+    {
+      title: "Prepare verified research bundle",
+      description:
+        "Fetch and verify independent HTTPS sources, persist only hashes and metadata, and return a time-bounded research bundle for position evaluation.",
+      inputSchema: prepareResearchBundleInputSchema,
+      outputSchema: prepareResearchBundleOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(prepareResearchBundleOutputSchema, () =>
+        deps.prepareResearchBundle(input)
       )
   );
 

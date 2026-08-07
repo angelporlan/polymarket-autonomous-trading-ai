@@ -579,20 +579,20 @@ interface VerifiedSource {
 
 ## Verificación del servidor
 
-- [ ] HTTPS obligatorio.
-- [ ] Resolver redirects con límite pequeño.
-- [ ] Bloquear IPs privadas, loopback, link-local y metadata endpoints.
-- [ ] Limitar tamaño de respuesta y tiempo de descarga.
-- [ ] Exigir `2xx` y contenido HTML/texto admitido.
-- [ ] Extraer título y fecha desde la respuesta, no confiar solo en el input.
-- [ ] Exigir dos dominios registrables independientes.
-- [ ] Rechazar Polymarket como evidencia de probabilidad.
-- [ ] Permitir Polymarket únicamente para reglas del mercado.
-- [ ] Ventana máxima:
+- [x] HTTPS obligatorio.
+- [x] Resolver redirects con límite pequeño.
+- [x] Bloquear IPs privadas, loopback, link-local y metadata endpoints.
+- [x] Limitar tamaño de respuesta y tiempo de descarga.
+- [x] Exigir `2xx` y contenido HTML/texto admitido.
+- [x] Extraer título y fecha desde la respuesta, no confiar solo en el input.
+- [x] Exigir dos dominios registrables independientes.
+- [x] Rechazar Polymarket como evidencia de probabilidad.
+- [x] Permitir Polymarket únicamente para reglas del mercado.
+- [x] Ventana máxima:
   - `SLOW`: 7 días;
   - `FAST`: 48 horas.
-- [ ] Guardar hashes, no el artículo completo.
-- [ ] Rechazar fuentes que no puedan recuperarse o verificarse.
+- [x] Guardar hashes, no el artículo completo.
+- [x] Rechazar fuentes que no puedan recuperarse o verificarse.
 
 ## Relación con la probabilidad
 
@@ -610,6 +610,14 @@ No se permite que el supervisor cree URLs sintéticas para aprobarse a sí mismo
 ## Criterio de aceptación
 
 Dos URLs inexistentes con dominios de Reuters/AP no superan la validación.
+
+## Evidencia de completado
+
+- `prepare_research_bundle` recupera fuentes con HTTPS, límite de redirects, DNS/IP público, timeout, límite de 2 MB, `2xx` y content types HTML/texto; extrae título, publisher y fecha de la respuesta.
+- Se persisten únicamente metadatos y hashes en `research_bundles`; el cuerpo del artículo no entra en SQLite ni en la respuesta MCP.
+- Las fuentes Polymarket están bloqueadas como evidencia, se exigen dos dominios registrables distintos y las ventanas son 7 días (`SLOW`) o 48 horas (`FAST`).
+- Una `ENTRY` live requiere un bundle vigente que coincida con mercado y probabilidad; el supervisor consume el último bundle no expirado y no genera URLs sintéticas para las salidas.
+- Verificación: `npm run typecheck` correcto y `test/research-verifier.test.ts` cubre fuentes válidas, páginas inexistentes, HTTPS, SSRF, redirects, content type, antigüedad, hashes y persistencia.
 
 ---
 

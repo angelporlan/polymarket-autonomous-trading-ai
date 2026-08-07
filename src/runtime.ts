@@ -17,7 +17,8 @@ import {
   type MarketSnapshot,
   type OrderProposal,
   type PaperTrade,
-  type PortfolioSnapshot
+  type PortfolioSnapshot,
+  type ResearchBundle
 } from "./domain/types.js";
 import type { TradingSession } from "./domain/session.js";
 import {
@@ -54,6 +55,8 @@ import type {
   ActivateTradingSessionOutput,
   PrepareTradingSessionInput,
   PrepareTradingSessionOutput,
+  PrepareResearchBundleInput,
+  PrepareResearchBundleOutput,
   SupervisePositionsInput,
   SupervisePositionsOutput
 } from "./mcp/schemas.js";
@@ -71,6 +74,7 @@ import {
 } from "./security/keychain.js";
 import { parseWithBigInts } from "./storage/codec.js";
 import { TradingDatabase } from "./storage/database.js";
+import { ResearchVerifier } from "./research/verifier.js";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const TERMINAL_PROPOSAL_STATUSES = new Set([
@@ -131,11 +135,13 @@ export class PolymarketRuntime {
   private readonly liveTrading: GuardedLiveTradingAdapter | null;
   private readonly approvalServer: DashboardHttpServer;
   private readonly service: TradingService;
+  private readonly researchVerifier: ResearchVerifier;
   private closed = false;
 
   constructor() {
     this.config = loadConfig();
     this.database = new TradingDatabase(this.config.databasePath);
+    this.researchVerifier = new ResearchVerifier();
     this.publicClient = new PolymarketPublicClient({
       gammaHost: this.config.gammaHost,
       dataHost: this.config.dataHost,
@@ -428,6 +434,25 @@ export class PolymarketRuntime {
     };
   }
 
+  async prepareResearchBundle(
+    input: PrepareResearchBundleInput
+  ): Promise<PrepareResearchBundleOutput> {
+    this.requireProfile();
+    const bundle = await this.researchVerifier.verify({
+      marketConditionId: input.conditionId,
+      tokenId: input.tokenId,
+      estimatedProbabilityMicros: parseDecimalToMicros(
+        input.estimatedProbability
+      ),
+      eventVolatilityClass: input.eventVolatilityClass,
+      requestedUrls: input.sourceUrls,
+      rationale: input.rationale,
+      counterRationale: input.counterRationale
+    });
+    this.database.saveResearchBundle(bundle);
+    return researchBundleOutput(bundle);
+  }
+
   async activateTradingSession(
     input: ActivateTradingSessionInput
   ): Promise<ActivateTradingSessionOutput> {
@@ -576,6 +601,9 @@ export class PolymarketRuntime {
       thesis: input.thesis,
       counterThesis: input.counterThesis,
       sources: input.sources,
+      ...(input.researchBundleId === undefined
+        ? {}
+        : { researchBundleId: input.researchBundleId }),
       ...(input.exitReason === undefined
         ? {}
         : { exitReason: input.exitReason })
@@ -831,6 +859,8 @@ export async function createMcpToolDependencies(): Promise<McpToolDependencies> 
     getOrderStatus: (input) => guarded(() => runtime.getOrderStatus(input)),
     prepareTradingSession: (input) =>
       guarded(() => runtime.prepareTradingSession(input)),
+    prepareResearchBundle: (input) =>
+      guarded(() => runtime.prepareResearchBundle(input)),
     activateTradingSession: (input) =>
       guarded(() => runtime.activateTradingSession(input)),
     getTradingSession: (input) =>
@@ -1000,6 +1030,7 @@ function proposalOutput(proposal: OrderProposal): StageOrderOutput {
     executionMode: proposal.executionMode,
     intent: proposal.intent,
     sessionId: proposal.sessionId,
+    researchBundleId: proposal.researchBundleId,
     createdAt: new Date(proposal.createdAtMs).toISOString(),
     expiresAt: new Date(proposal.expiresAtMs).toISOString(),
     market: marketSnapshotOutput(proposal.market, "unknown", true),
@@ -1025,6 +1056,39 @@ function proposalOutput(proposal: OrderProposal): StageOrderOutput {
     ...(proposal.exitReason === undefined
       ? {}
       : { exitReason: proposal.exitReason })
+  };
+}
+
+function researchBundleOutput(
+  bundle: ResearchBundle
+): PrepareResearchBundleOutput {
+  return {
+    researchBundleId: bundle.id,
+    conditionId: bundle.marketConditionId,
+    tokenId: bundle.tokenId,
+    estimatedProbability: formatMicros(bundle.estimatedProbabilityMicros),
+    eventVolatilityClass: bundle.eventVolatilityClass,
+    createdAt: new Date(bundle.createdAtMs).toISOString(),
+    expiresAt: new Date(bundle.expiresAtMs).toISOString(),
+    sources: bundle.sources.map((source) => ({
+      requestedUrl: source.requestedUrl,
+      finalUrl: source.finalUrl,
+      registrableDomain: source.registrableDomain,
+      publisher: source.publisher,
+      title: source.title,
+      publishedAt: new Date(source.publishedAtMs).toISOString(),
+      retrievedAt: new Date(source.retrievedAtMs).toISOString(),
+      httpStatus: source.httpStatus,
+      contentType: source.contentType as
+        | "text/html"
+        | "text/plain"
+        | "application/xhtml+xml",
+      excerptHash: source.excerptHash,
+      responseBodyHash: source.responseBodyHash
+    })),
+    rationale: bundle.rationale,
+    counterRationale: bundle.counterRationale,
+    contentHash: bundle.contentHash
   };
 }
 

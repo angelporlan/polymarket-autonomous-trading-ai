@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   ProposalRejectedError,
   createOrderProposal,
+  hashCanonical,
   verifyProposalHash
 } from "../domain/proposals.js";
 import {
@@ -24,6 +25,7 @@ import {
   type OrderSide,
   type PositionRecord,
   type PortfolioSnapshot,
+  type ResearchBundle,
   type UserTradeActivity
 } from "../domain/types.js";
 import { validateEvidenceSources } from "../domain/source-validator.js";
@@ -374,6 +376,28 @@ export class TradingService {
       side: input.side,
       limitPriceMicros
     });
+    const researchBundle = input.researchBundleId
+      ? this.options.database.getResearchBundle(input.researchBundleId)
+      : null;
+    if (
+      input.executionMode === "live" &&
+      input.intent === "ENTRY" &&
+      !isResearchBundleUsable(
+        researchBundle,
+        snapshot.conditionId,
+        snapshot.tokenId,
+        estimatedProbabilityMicros,
+        this.now()
+      )
+    ) {
+      throw new ProposalRejectedError([
+        {
+          code: "SOURCE_VALIDATION_FAILED",
+          message:
+            "Live ENTRY orders require a current verified research bundle matching the market and probability."
+        }
+      ]);
+    }
     const correlationKey = canonicalCorrelationKey(snapshot);
     const context = await this.options.riskContexts.forOrder(
       snapshot,
@@ -384,6 +408,7 @@ export class TradingService {
     const intent: OrderIntent = {
       intent: input.intent,
       sessionId: activeSession?.id ?? null,
+      researchBundleId: researchBundle?.id ?? null,
       executionMode: input.executionMode,
       market: snapshot,
       side: input.side,
@@ -392,7 +417,9 @@ export class TradingService {
       estimatedProbabilityMicros,
       thesis: input.thesis,
       counterThesis: input.counterThesis,
-      sources: input.sources,
+      sources: researchBundle
+        ? evidenceSourcesFromResearchBundle(researchBundle)
+        : input.sources,
       correlationKey,
       ...(input.exitReason === undefined
         ? {}
@@ -644,11 +671,16 @@ export class TradingService {
         };
       }
 
+      const researchBundle = this.options.database.getLatestResearchBundle(
+        p.conditionId,
+        p.tokenId,
+        nowMs
+      );
       const action = evaluatePositionExitPolicy(
         rec,
         p.currentPriceMicros,
-        null,
-        null,
+        researchBundle?.estimatedProbabilityMicros ?? null,
+        researchBundle?.id ?? null,
         p.endTimeMs,
         nowMs
       );
@@ -659,6 +691,11 @@ export class TradingService {
         averagePriceMicros: p.averagePriceMicros,
         lastEvaluatedAtMs: nowMs,
         lastMarketPriceMicros: p.currentPriceMicros,
+        lastEstimatedProbabilityMicros:
+          researchBundle?.estimatedProbabilityMicros ??
+          rec.lastEstimatedProbabilityMicros,
+        lastResearchBundleId:
+          researchBundle?.id ?? rec.lastResearchBundleId,
         exitState:
           rec.exitState === "CLOSING" || rec.exitState === "CLOSED"
             ? rec.exitState
@@ -696,22 +733,7 @@ export class TradingService {
             exitReason,
             thesis: `Position exit supervisor auto-execution triggered: ${action.triggerReason}. ${action.explanation}`,
             counterThesis: "Position supervisor exit policy execution mandated to control downside risk.",
-            sources: [
-              {
-                url: "https://www.reuters.com/business/finance/market-supervisor-exit-policy",
-                title: "Position Exit Supervisor Automatic Execution Trigger",
-                publishedAt: new Date(nowMs - 3600 * 1000).toISOString(),
-                retrievedAt: new Date(nowMs).toISOString(),
-                primary: true
-              },
-              {
-                url: "https://www.apnews.com/article/financial-risk-policy-supervisor",
-                title: "Risk Management Automated Exit Policy",
-                publishedAt: new Date(nowMs - 3600 * 1000).toISOString(),
-                retrievedAt: new Date(nowMs).toISOString(),
-                primary: false
-              }
-            ]
+            sources: []
           });
 
           let exitAccepted =
@@ -1288,6 +1310,22 @@ export class TradingService {
     if (!verifyProposalHash(proposal)) {
       throw new Error("PROPOSAL_HASH_INVALID");
     }
+    if (proposal.intent === "ENTRY") {
+      const bundle = proposal.researchBundleId
+        ? this.options.database.getResearchBundle(proposal.researchBundleId)
+        : null;
+      if (
+        !isResearchBundleUsable(
+          bundle,
+          proposal.market.conditionId,
+          proposal.market.tokenId,
+          proposal.estimatedProbabilityMicros,
+          this.now()
+        )
+      ) {
+        throw new Error("RESEARCH_BUNDLE_INVALID");
+      }
+    }
     const refreshed = await this.options.marketData.getMarketSnapshot({
       conditionId: proposal.market.conditionId,
       tokenId: proposal.market.tokenId,
@@ -1307,6 +1345,7 @@ export class TradingService {
       {
         intent: proposal.intent,
         sessionId: proposal.sessionId,
+        researchBundleId: proposal.researchBundleId,
         executionMode: "live",
         market: refreshed,
         side: proposal.side,
@@ -1365,6 +1404,12 @@ function requireResearchFields(input: StageOrderInput, nowMs = Date.now()): void
   if (input.thesis.trim().length < 20 || input.counterThesis.trim().length < 20) {
     throw new Error("Thesis and counter-thesis must each contain at least 20 characters.");
   }
+  if (input.intent === "EXIT") {
+    return;
+  }
+  if (input.researchBundleId !== undefined) {
+    return;
+  }
   const validation = validateEvidenceSources(input.sources, nowMs);
   if (!validation.valid) {
     throw new ProposalRejectedError([
@@ -1374,6 +1419,38 @@ function requireResearchFields(input: StageOrderInput, nowMs = Date.now()): void
       }
     ]);
   }
+}
+
+function isResearchBundleUsable(
+  bundle: ResearchBundle | null,
+  conditionId: string,
+  tokenId: string,
+  estimatedProbabilityMicros: bigint,
+  nowMs: number
+): bundle is ResearchBundle {
+  if (
+    bundle === null ||
+    bundle.marketConditionId !== conditionId ||
+    bundle.tokenId !== tokenId ||
+    bundle.expiresAtMs <= nowMs ||
+    bundle.estimatedProbabilityMicros !== estimatedProbabilityMicros
+  ) {
+    return false;
+  }
+  const { contentHash: _contentHash, ...content } = bundle;
+  return hashCanonical(content) === bundle.contentHash;
+}
+
+function evidenceSourcesFromResearchBundle(
+  bundle: ResearchBundle
+): StageOrderInput["sources"] {
+  return bundle.sources.map((source, index) => ({
+    url: source.finalUrl,
+    title: source.title,
+    publishedAt: new Date(source.publishedAtMs).toISOString(),
+    retrievedAt: new Date(source.retrievedAtMs).toISOString(),
+    primary: index === 0
+  }));
 }
 
 function toExitReason(reason: ExitState): ExitReason {

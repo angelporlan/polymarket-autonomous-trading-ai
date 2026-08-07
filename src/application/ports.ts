@@ -140,6 +140,7 @@ export interface StageOrderInput {
   executionMode: "paper" | "live";
   intent: OrderIntentType;
   exitReason?: ExitReason;
+  researchBundleId?: string;
   conditionId: string;
   tokenId: string;
   outcome: string;

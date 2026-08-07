@@ -9,7 +9,8 @@ import type {
   OrderProposal,
   PaperTrade,
   PositionRecord,
-  ProposalStatus
+  ProposalStatus,
+  ResearchBundle
 } from "../domain/types.js";
 import {
   createTradingSession,
@@ -1468,6 +1469,54 @@ export class TradingDatabase {
     });
   }
 
+  saveResearchBundle(bundle: ResearchBundle): void {
+    this.db
+      .prepare(
+        `INSERT INTO research_bundles
+          (id, market_condition_id, token_id, created_at_ms, expires_at_ms, content_hash, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO NOTHING`
+      )
+      .run(
+        bundle.id,
+        bundle.marketConditionId,
+        bundle.tokenId,
+        bundle.createdAtMs,
+        bundle.expiresAtMs,
+        bundle.contentHash,
+        stringifyWithBigInts(bundle)
+      );
+    this.appendAudit("RESEARCH_BUNDLE_VERIFIED", bundle.id, {
+      marketConditionId: bundle.marketConditionId,
+      tokenId: bundle.tokenId,
+      contentHash: bundle.contentHash,
+      sourceDomains: bundle.sources.map((source) => source.registrableDomain),
+      expiresAtMs: bundle.expiresAtMs
+    });
+  }
+
+  getResearchBundle(id: string): ResearchBundle | null {
+    const row = this.db
+      .prepare("SELECT payload_json FROM research_bundles WHERE id = ?")
+      .get(id) as ProposalRow | undefined;
+    return row ? parseWithBigInts<ResearchBundle>(row.payload_json) : null;
+  }
+
+  getLatestResearchBundle(
+    marketConditionId: string,
+    tokenId: string,
+    nowMs = Date.now()
+  ): ResearchBundle | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload_json FROM research_bundles
+         WHERE market_condition_id = ? AND token_id = ? AND expires_at_ms > ?
+         ORDER BY created_at_ms DESC LIMIT 1`
+      )
+      .get(marketConditionId, tokenId, nowMs) as ProposalRow | undefined;
+    return row ? parseWithBigInts<ResearchBundle>(row.payload_json) : null;
+  }
+
   getPositionRecord(tokenId: string): PositionRecord | null {
     const row = this.db
       .prepare("SELECT payload_json FROM position_records WHERE token_id = ?")
@@ -1879,6 +1928,16 @@ export class TradingDatabase {
         payload_json TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS research_bundles (
+        id TEXT PRIMARY KEY,
+        market_condition_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        content_hash TEXT NOT NULL UNIQUE,
+        payload_json TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS exit_reservations (
         proposal_id TEXT PRIMARY KEY REFERENCES proposals(id),
         token_id TEXT NOT NULL,
@@ -1893,6 +1952,8 @@ export class TradingDatabase {
         ON pending_trading_sessions(execution_mode, status);
       CREATE INDEX IF NOT EXISTS idx_exit_reservations_token
         ON exit_reservations(token_id);
+      CREATE INDEX IF NOT EXISTS idx_research_bundles_market
+        ON research_bundles(market_condition_id, token_id, expires_at_ms);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_clob_order_id
         ON executions(clob_order_id)
         WHERE clob_order_id IS NOT NULL;

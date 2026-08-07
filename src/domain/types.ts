@@ -63,9 +63,40 @@ export interface EvidenceSource {
   primary: boolean;
 }
 
+export type EventVolatilityClass = "SLOW" | "FAST";
+
+export interface VerifiedSource {
+  requestedUrl: string;
+  finalUrl: string;
+  registrableDomain: string;
+  publisher: string;
+  title: string;
+  publishedAtMs: number;
+  retrievedAtMs: number;
+  httpStatus: number;
+  contentType: string;
+  excerptHash: string;
+  responseBodyHash: string;
+}
+
+export interface ResearchBundle {
+  id: string;
+  marketConditionId: string;
+  tokenId: string;
+  estimatedProbabilityMicros: bigint;
+  eventVolatilityClass: EventVolatilityClass;
+  createdAtMs: number;
+  expiresAtMs: number;
+  sources: VerifiedSource[];
+  rationale: string;
+  counterRationale: string;
+  contentHash: string;
+}
+
 export interface OrderIntent {
   intent: OrderIntentType;
   sessionId?: string | null;
+  researchBundleId?: string | null;
   executionMode: ExecutionMode;
   market: MarketSnapshot;
   side: OrderSide;
@@ -134,6 +165,7 @@ export interface OrderProposal {
   expiresAtMs: number;
   intent: OrderIntentType;
   sessionId: string | null;
+  researchBundleId: string | null;
   executionMode: ExecutionMode;
   market: MarketSnapshot;
   side: OrderSide;

@@ -539,6 +539,7 @@ function makeProposal(nowMs: number, sessionId = "session-security-test"): Order
     expiresAtMs: nowMs + 90_000,
     intent: "ENTRY",
     sessionId,
+    researchBundleId: null,
     executionMode: "live",
     market: {
       conditionId: "condition",

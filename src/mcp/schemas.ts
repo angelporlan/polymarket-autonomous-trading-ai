@@ -172,6 +172,7 @@ export const orderProposalSchema = z
     createdAt: timestampSchema,
     expiresAt: timestampSchema,
     sessionId: identifierSchema.nullable(),
+    researchBundleId: identifierSchema.nullable(),
     market: marketSnapshotSchema,
     side: orderSideSchema,
     shares: positiveDecimalSchema,
@@ -185,7 +186,7 @@ export const orderProposalSchema = z
     postTradeTotalExposurePusd: nonNegativeDecimalSchema,
     thesis: z.string().trim().min(20),
     counterThesis: z.string().trim().min(20),
-    sources: z.array(evidenceSourceSchema).min(1),
+    sources: z.array(evidenceSourceSchema),
     correlationKey: z.string().trim().min(1).max(200),
     policyVersion: z.string().trim().min(1),
     exitReason: exitReasonSchema.optional()
@@ -360,6 +361,55 @@ export const getOrderStatusOutputSchema = z
   })
   .strict();
 
+const httpsUrlSchema = z.string().url().refine(
+  (value) => new URL(value).protocol === "https:",
+  "Research sources must use HTTPS."
+);
+
+export const prepareResearchBundleInputSchema = z
+  .object({
+    conditionId: identifierSchema,
+    tokenId: identifierSchema,
+    estimatedProbability: probabilityDecimalSchema,
+    eventVolatilityClass: z.enum(["SLOW", "FAST"]),
+    sourceUrls: z.array(httpsUrlSchema).min(2).max(5),
+    rationale: z.string().trim().min(20).max(5_000),
+    counterRationale: z.string().trim().min(20).max(5_000)
+  })
+  .strict();
+
+export const verifiedSourceSchema = z
+  .object({
+    requestedUrl: httpsUrlSchema,
+    finalUrl: httpsUrlSchema,
+    registrableDomain: identifierSchema,
+    publisher: z.string().trim().min(1).max(200),
+    title: z.string().trim().min(3).max(500),
+    publishedAt: timestampSchema,
+    retrievedAt: timestampSchema,
+    httpStatus: z.number().int().min(200).max(299),
+    contentType: z.enum(["text/html", "text/plain", "application/xhtml+xml"]),
+    excerptHash: proposalHashSchema,
+    responseBodyHash: proposalHashSchema
+  })
+  .strict();
+
+export const prepareResearchBundleOutputSchema = z
+  .object({
+    researchBundleId: identifierSchema,
+    conditionId: identifierSchema,
+    tokenId: identifierSchema,
+    estimatedProbability: probabilityDecimalSchema,
+    eventVolatilityClass: z.enum(["SLOW", "FAST"]),
+    createdAt: timestampSchema,
+    expiresAt: timestampSchema,
+    sources: z.array(verifiedSourceSchema).min(2),
+    rationale: z.string().trim().min(20),
+    counterRationale: z.string().trim().min(20),
+    contentHash: proposalHashSchema
+  })
+  .strict();
+
 export const stageOrderInputSchema = z
   .object({
     executionMode: z.enum(["paper", "live"]).default("paper"),
@@ -371,15 +421,27 @@ export const stageOrderInputSchema = z
     shares: positiveDecimalSchema,
     limitPricePusd: probabilityDecimalSchema,
     estimatedProbability: probabilityDecimalSchema,
+    researchBundleId: identifierSchema.optional(),
     thesis: z.string().trim().min(20).max(5_000),
     counterThesis: z.string().trim().min(20).max(5_000),
-    sources: z.array(evidenceSourceSchema).min(1).max(20),
+    sources: z.array(evidenceSourceSchema).max(20),
     exitReason: exitReasonSchema.optional(),
     confirmsNoConfidentialInformation: z.literal(true),
     confirmsNoOutcomeInfluence: z.literal(true)
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      value.intent === "ENTRY" &&
+      value.sources.length === 0 &&
+      value.researchBundleId === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["sources"],
+        message: "ENTRY orders require verified evidence sources."
+      });
+    }
     if (value.intent === "ENTRY" && value.side !== "BUY") {
       context.addIssue({
         code: "custom",
@@ -587,6 +649,12 @@ export type GetRiskStatusInput = z.infer<typeof getRiskStatusInputSchema>;
 export type GetRiskStatusOutput = z.infer<typeof getRiskStatusOutputSchema>;
 export type GetOrderStatusInput = z.infer<typeof getOrderStatusInputSchema>;
 export type GetOrderStatusOutput = z.infer<typeof getOrderStatusOutputSchema>;
+export type PrepareResearchBundleInput = z.infer<
+  typeof prepareResearchBundleInputSchema
+>;
+export type PrepareResearchBundleOutput = z.infer<
+  typeof prepareResearchBundleOutputSchema
+>;
 export type StageOrderInput = z.infer<typeof stageOrderInputSchema>;
 export type StageOrderOutput = z.infer<typeof stageOrderOutputSchema>;
 export type ExecuteStagedOrderInput = z.infer<
