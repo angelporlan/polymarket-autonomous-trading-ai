@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
+import type { SessionAuthorizationAttestation } from "../domain/session.js";
 
 export const KEYCHAIN_SERVICE = "codex-polymarket-guarded";
 export const SOCIAL_PRIVATE_KEY_ACCOUNT = "social-private-key.v1";
 export const L2_CREDENTIALS_ACCOUNT = "l2-credentials.v1";
+export const SESSION_AUTHORIZATION_ACCOUNT = "session-authorization.v1";
 
 const PROTOCOL_VERSION = 1;
 const MAX_FRAME_BYTES = 128 * 1024;
@@ -26,7 +28,8 @@ export interface KeychainItemStatus {
 
 export type ProtectedAccount =
   | typeof SOCIAL_PRIVATE_KEY_ACCOUNT
-  | typeof L2_CREDENTIALS_ACCOUNT;
+  | typeof L2_CREDENTIALS_ACCOUNT
+  | typeof SESSION_AUTHORIZATION_ACCOUNT;
 
 export class KeychainHelperError extends Error {
   readonly code: string;
@@ -45,7 +48,12 @@ export interface MacOSKeychainOptions {
 
 interface HelperRequestHeader {
   version: 1;
-  operation: "status" | "import-social-key" | "put" | "read";
+  operation:
+    | "status"
+    | "import-social-key"
+    | "authorize-session"
+    | "put"
+    | "read";
   service: typeof KEYCHAIN_SERVICE;
   account: ProtectedAccount;
   payloadLength: number;
@@ -139,6 +147,77 @@ export class MacOSKeychain implements KeychainPort {
       throw new KeychainHelperError("INVALID_PRIVATE_KEY");
     }
     return secret;
+  }
+
+  async authorizeTradingSession(input: {
+    pendingSessionId: string;
+    executionMode: "paper" | "live";
+    maximumAuthorizableMicros: bigint;
+    expiresAtMs: number;
+  }): Promise<SessionAuthorizationAttestation> {
+    if (
+      !/^pending_[0-9]+_[a-f0-9-]+$/u.test(input.pendingSessionId) ||
+      input.maximumAuthorizableMicros <= 0n ||
+      !Number.isSafeInteger(input.expiresAtMs)
+    ) {
+      throw new KeychainHelperError("INVALID_SESSION_AUTHORIZATION");
+    }
+    const payload = Buffer.from(
+      JSON.stringify({
+        pendingSessionId: input.pendingSessionId,
+        executionMode: input.executionMode,
+        maximumAuthorizableMicros: input.maximumAuthorizableMicros.toString(),
+        expiresAtMs: input.expiresAtMs
+      }),
+      "utf8"
+    );
+    try {
+      const response = await this.invoke(
+        {
+          version: PROTOCOL_VERSION,
+          operation: "authorize-session",
+          service: KEYCHAIN_SERVICE,
+          account: SESSION_AUTHORIZATION_ACCOUNT,
+          payloadLength: payload.byteLength
+        },
+        payload
+      );
+      try {
+        const candidate = JSON.parse(response.payload.toString("utf8")) as Record<
+          string,
+          unknown
+        >;
+        if (
+          candidate.pendingSessionId !== input.pendingSessionId ||
+          candidate.source !== "macos-native-user-presence" ||
+          typeof candidate.amountMicros !== "string" ||
+          !/^\d+$/u.test(candidate.amountMicros) ||
+          BigInt(candidate.amountMicros) <= 0n ||
+          BigInt(candidate.amountMicros) > input.maximumAuthorizableMicros ||
+          typeof candidate.attestationNonce !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(candidate.attestationNonce) ||
+          typeof candidate.confirmedAtMs !== "number" ||
+          !Number.isSafeInteger(candidate.confirmedAtMs) ||
+          candidate.confirmedAtMs > input.expiresAtMs
+        ) {
+          throw new KeychainHelperError("INVALID_SESSION_ATTESTATION");
+        }
+        return {
+          pendingSessionId: input.pendingSessionId,
+          amountMicros: BigInt(candidate.amountMicros),
+          attestationNonce: candidate.attestationNonce,
+          attestationSource: "macos-native-user-presence",
+          confirmedAtMs: candidate.confirmedAtMs
+        };
+      } catch (error) {
+        if (error instanceof KeychainHelperError) throw error;
+        throw new KeychainHelperError("MALFORMED_SESSION_ATTESTATION");
+      } finally {
+        response.payload.fill(0);
+      }
+    } finally {
+      payload.fill(0);
+    }
   }
 
   private async readProtectedSecret(

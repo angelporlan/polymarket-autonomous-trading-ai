@@ -193,7 +193,6 @@ Debe ser de solo lectura y devolver:
   hardCeilingRemainingPusd: string;
   dailyStopRemainingPusd: string;
   maximumAuthorizablePusd: string;
-  challenge: string;
   expiresAt: string;
 }
 ```
@@ -202,7 +201,7 @@ Reglas:
 
 - [x] En live, si el efectivo real es desconocido, responder con bloqueo.
 - [x] No usar un fallback de 100 pUSD.
-- [x] El challenge debe ser aleatorio, de un solo uso y de corta duración.
+- [x] La autorización se realiza en una ventana nativa separada, con importe introducido allí y presencia de usuario mediante LocalAuthentication; MCP no recibe el challenge.
 - [x] No debe existir todavía una sesión activa.
 
 ### Confirmación local de una sola vez
@@ -213,12 +212,8 @@ Opciones admitidas:
 
 ```bash
 npm run session:authorize -- \
-  --pending <id> \
-  --amount 25 \
-  --challenge ABC123
+  --pending <id>
 ```
-
-- O formulario loopback dedicado exclusivamente a **activar la sesión**, nunca a aprobar órdenes.
 
 La confirmación debe persistir:
 
@@ -226,7 +221,8 @@ La confirmación debe persistir:
 {
   pendingSessionId,
   amountMicros,
-  challengeHash,
+  attestationNonce,
+  attestationSource,
   confirmedAtMs,
   consumedAtMs: null
 }
@@ -276,10 +272,10 @@ El agente no puede iniciar, renovar ni ampliar una sesión sin una nueva acción
 
 - Se eliminaron `start_trading_session` y `get_session_status` del contrato MCP. La ruta paper auxiliar tampoco crea sesiones automáticamente.
 - `prepare_trading_session` calcula la capacidad con efectivo real, exposición abierta, techo duro, stop diario y límite canary/piloto; live se bloquea si el efectivo es desconocido.
-- El challenge se genera aleatoriamente, caduca en 10 minutos y solo se persiste como SHA-256.
-- `session:authorize` valida challenge, importe máximo y ausencia de sesión activa; `activate_trading_session` consume la autorización y crea la sesión en una transacción SQLite atómica.
+- El identificador interno efímero caduca en 10 minutos; no se devuelve el challenge al MCP ni se acepta por argumentos de shell.
+- `session:authorize` delega importe y presencia local al helper nativo macOS; la base valida nonce, origen, timestamp, importe máximo y ausencia de sesión activa. `activate_trading_session` consume la autorización y crea la sesión en una transacción SQLite atómica.
 - La activación revalida la capacidad actual y rechaza cualquier importe confirmado que ya no sea seguro; no existe ampliación automática.
-- Verificación: `npm run typecheck` correcto, `npm test` correcto (`24` archivos, `232` tests), `npm run build` correcto.
+- Verificación: `npm run typecheck` correcto, `npm test` correcto (`29` archivos, `254` tests), `npm run build` correcto.
 
 ---
 
@@ -428,7 +424,7 @@ Una posición que alcanza un stop genera una venta limitada real con tamaño má
 
 - `stageOrder` vuelve a consultar la posición liquidada antes de reservar una salida live; `TradingDatabase.stageProposal` impide carreras y rechaza reservas que superen las acciones disponibles.
 - El precio de una salida live no puede superar el `bestBidMicros` del snapshot fresco; tick, tamaño mínimo, fees, reglas, contrato, geoblock e identidad siguen pasando por las validaciones normales de riesgo y preflight.
-- `updateExecutionStatus` reduce la reserva con fills parciales y la libera en estados terminales; un fallo de submission también libera la reserva.
+- `updateExecutionStatus` reduce la reserva con fills parciales y la libera en estados terminales; un fallo determinista previo al POST libera la reserva, mientras un POST incierto la conserva como `SUBMISSION_UNKNOWN`.
 - El supervisor solo marca `CLOSING` si la ejecución fue aceptada y existe el execution record; una ejecución bloqueada conserva la posición en su estado anterior.
 - Verificación parcial: `npm run typecheck` correcto y las pruebas P4 de reservas, fills parciales y supervisor rechazado pasan (`3` tests nuevos).
 
@@ -448,6 +444,11 @@ lastEstimatedProbabilityMicros: bigint | null;
 lastResearchBundleId: string | null;
 entryProbabilityMicros: bigint | null;
 entryEdgeMicros: bigint | null;
+entryFeesMicros: bigint | null;
+entryTransactionHashesJson: string;
+researchRequiredSinceMs: number | null;
+researchRequiredAtPriceMicros: bigint | null;
+minimumResearchCreatedAtMs: number | null;
 exitState: ExitState;
 activeExitProposalId: string | null;
 activeExitOrderId: string | null;
@@ -532,6 +533,7 @@ por defecto: HOLD_UNTIL_RESOLUTION
 - `PositionRecord` separa `lastMarketPriceMicros`, `lastEstimatedProbabilityMicros`, `lastResearchBundleId`, probabilidades/edge de entrada y los IDs de la salida activa; los registros antiguos se normalizan sin convertir silenciosamente el precio en probabilidad.
 - El supervisor aplica stop-loss al 70%, take-profit al 150%, duración máxima de 14 días y conserva `HOLD_UNTIL_RESOLUTION` durante la ventana de 24 horas.
 - Un movimiento de precio del 20% produce `RESEARCH_REQUIRED` sin vender; la pérdida de edge queda bloqueada hasta recibir probabilidad y bundle de research válidos.
+- `researchRequiredSinceMs`, el precio del shock y `minimumResearchCreatedAtMs` se conservan entre ciclos y solo se limpian con un bundle creado después del shock.
 - La salida usa probabilidad `0` cuando aún no existe estimación, únicamente como valor neutro de transporte para `EXIT`; nunca reutiliza el precio de mercado como probabilidad.
 - Verificación: `npm run typecheck` correcto y `test/position-supervisor.test.ts` pasa con cobertura de thresholds, ausencia de fallback, bundle requerido y shock del 20%.
 
@@ -614,9 +616,10 @@ Dos URLs inexistentes con dominios de Reuters/AP no superan la validación.
 ## Evidencia de completado
 
 - `prepare_research_bundle` recupera fuentes con HTTPS, límite de redirects, DNS/IP público, timeout, límite de 2 MB, `2xx` y content types HTML/texto; extrae título, publisher y fecha de la respuesta.
-- Se persisten únicamente metadatos y hashes en `research_bundles`; el cuerpo del artículo no entra en SQLite ni en la respuesta MCP.
+- Se persisten únicamente metadatos, hashes y una auditoría semántica (`supportedClaims`, `contradictedClaims`, `quotedFactHashes`, `probabilityImpactMicros`) en `research_bundles`; el cuerpo del artículo no entra en SQLite ni en la respuesta MCP.
 - Las fuentes Polymarket están bloqueadas como evidencia, se exigen dos dominios registrables distintos y las ventanas son 7 días (`SLOW`) o 48 horas (`FAST`).
 - Una `ENTRY` live requiere un bundle vigente que coincida con mercado y probabilidad; el supervisor consume el último bundle no expirado y no genera URLs sintéticas para las salidas.
+- La expiración efectiva es el mínimo entre la ventana del bundle y `publishedAt + maxAge` de cada fuente; antes de firmar se revalidan edad, dominio, URLs y hashes.
 - Verificación: `npm run typecheck` correcto y `test/research-verifier.test.ts` cubre fuentes válidas, páginas inexistentes, HTTPS, SSRF, redirects, content type, antigüedad, hashes y persistencia.
 
 ---
@@ -802,7 +805,7 @@ superficie de autorización.
 - [x] El runtime/MCP ya no contiene `beginExecution`, `executeLocallyApproved`, `ApprovalUrlPort`, `LocalApproval`, `AWAITING_LOCAL`, `LOCALLY_APPROVED` ni el alias `ApprovalHttpServer`; las filas históricas de la tabla SQLite de aprobaciones, si existen en una base previa, no se borran ni se vuelven a leer.
 - [x] `execute_staged_order` reclama y ejecuta de forma autónoma mediante `claimAutonomousExecution`, ligado a `proposalId`, hash y sesión; no existe confirmación por orden en el dashboard.
 - [x] El dashboard arranca antes de conectar el transporte MCP, se limita a `127.0.0.1`, valida `Host`/`Origin`, acepta únicamente `GET` y expone estado, sesiones, posiciones, research bundles, órdenes, PnL paper, locks y última reconciliación sin respuestas autenticadas ni acciones financieras.
-- [x] Verificación: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `251` tests); `test/approval-server.test.ts` cubre el snapshot de telemetría, PnL desde checkpoint y el bloqueo de `POST`.
+- [x] Verificación: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `254` tests); `test/approval-server.test.ts` cubre el snapshot de telemetría, PnL desde checkpoint y el bloqueo de `POST`.
 
 ---
 
@@ -812,8 +815,8 @@ superficie de autorización.
 
 ### Sesiones
 
-- [ ] El agente no puede activar una sesión sin confirmación local.
-- [ ] Un challenge se consume una sola vez.
+- [x] El agente no puede activar una sesión sin confirmación nativa local.
+- [x] La atestación nativa de presencia se consume una sola vez.
 - [ ] Una sesión no puede ampliarse.
 - [ ] Una sesión caducada bloquea entradas.
 - [ ] Balance desconocido bloquea live.
@@ -828,8 +831,8 @@ superficie de autorización.
 
 ### Salidas
 
-- [ ] `EXIT` no consume presupuesto de entrada.
-- [ ] `EXIT` solo reduce posición.
+- [x] `EXIT` no consume presupuesto de entrada.
+- [x] `EXIT` solo reduce posición.
 - [ ] No permite vender más de lo poseído.
 - [ ] Dos salidas concurrentes no reservan las mismas acciones.
 - [ ] Stop-loss crea y envía una venta con doble control.
@@ -837,13 +840,13 @@ superficie de autorización.
 - [ ] 14 días crea salida.
 - [ ] <24h mantiene hasta resolución.
 - [ ] Fill parcial actualiza la posición restante.
-- [ ] Una ejecución fallida no marca `CLOSING`.
+- [x] Una ejecución fallida o shadow no marca `CLOSING`.
 
 ### Supervisor
 
 - [ ] Antigravity cerrado no detiene el supervisor.
 - [ ] Dos instancias no pueden ejecutarse a la vez.
-- [ ] Movimiento del 20 % genera `RESEARCH_REQUIRED`.
+- [x] Movimiento del 20 % genera `RESEARCH_REQUIRED` persistente.
 - [ ] No confunde precio con probabilidad.
 
 ### Fuentes
@@ -860,16 +863,17 @@ superficie de autorización.
 
 - [ ] Dos claims concurrentes → una única ejecución.
 - [ ] Reinicio durante `EXECUTING` → lock persistente.
-- [ ] Timeout tras POST incierto → no reenvía; primero reconcilia.
+- [x] Timeout tras POST incierto → no reenvía; conserva `SUBMISSION_UNKNOWN` y primero reconcilia.
 - [ ] La misma propuesta nunca produce dos órdenes CLOB.
 
 ## Evidencia acumulada
 
-- [x] `test/session.test.ts`, `test/session-binding.test.ts`, `test/onboarding.test.ts` y `test/risk-context.test.ts` cubren challenge de un solo uso, expiración, presupuesto no ampliable, binding de sesión, presupuesto insuficiente, salidas sin consumo de presupuesto de entrada y reinicio entre sesiones.
+- [x] `test/session.test.ts`, `test/session-binding.test.ts`, `test/onboarding.test.ts` y `test/risk-context.test.ts` cubren atestación nativa de un solo uso, expiración, presupuesto no ampliable, binding de sesión, presupuesto insuficiente, salidas sin consumo de presupuesto de entrada y reinicio entre sesiones.
 - [x] `test/domain.test.ts`, `test/risk-hard-ceiling.test.ts`, `test/polymarket-client.test.ts` y `test/live-reconciliation.test.ts` cubren hash inmutable, límites, fees, GTD, sanitización, fills y reconciliación sin credenciales ni endpoints productivos.
 - [x] `test/exit-reservation.test.ts`, `test/position-supervisor.test.ts`, `test/paper-reconciler.test.ts` y `test/paper-simulation-runner.test.ts` cubren reservas de salida, stops, take-profit, duración, resolución, fills parciales, PnL y errores de reconciliación.
+- [x] `test/exit-reservation.test.ts` cubre `SUBMISSION_UNKNOWN`, reservas conservadas y shadow sin mutación de posiciones live; la importación legacy puede mejorar un registro `LEGACY_UNVERIFIED`.
 - [x] `test/session-binding.test.ts` cubre la reclamación de una propuesta una sola vez; `test/storage.test.ts` añade la prueba explícita de reinicio durante `EXECUTING`, conservando el execution `CLAIMED`, expirando la propuesta e impidiendo un reenvío.
-- [x] Verificación local: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `251` tests).
+- [x] Verificación local: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `254` tests).
 - [x] `npm audit --audit-level=high` queda sin vulnerabilidades altas tras una actualización no forzada del lockfile. Permanecen dos moderadas del `@modelcontextprotocol/sdk@1.29.0` fijado y vulnerabilidades bajas transitivas, incluida `elliptic` sin fix disponible; no se ejecutó `npm audit fix --force`.
 - [x] Escaneo dirigido de secretos sobre código no generado, excluyendo fixtures sintéticos, no encontró claves privadas, frases semilla, credenciales L2, tokens Bearer ni claves API utilizables; `gitleaks` no está instalado en el entorno.
 - [ ] El soak paper de 14 días y el shadow live de 7 días aún requieren ejecución operativa sostenida; no se declaran completados por pruebas unitarias.

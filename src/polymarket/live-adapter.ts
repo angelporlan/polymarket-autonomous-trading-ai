@@ -33,7 +33,10 @@ import {
   type InjectedClobSigner,
   type LiveClobClient
 } from "./live-client.js";
-import { SafeExternalServiceError } from "./safe-error.js";
+import {
+  SafeExternalServiceError,
+  toSubmissionUnknownError
+} from "./safe-error.js";
 import {
   PolymarketUserChannelMonitor,
   type UserChannelEvent,
@@ -263,11 +266,24 @@ export class GuardedLiveTradingAdapter implements LiveTradingPort {
         USER_CHANNEL_START_TIMEOUT_MS,
         "Authenticated user-channel startup timed out."
       );
-      const submission = await withTimeout(
-        client.guarded.executeStagedProposal(proposal),
-        LIVE_SUBMISSION_TIMEOUT_MS,
-        "CLOB submission result timed out."
-      );
+      let submission: Awaited<
+        ReturnType<PolymarketLiveClient["executeStagedProposal"]>
+      >;
+      try {
+        submission = await withTimeout(
+          client.guarded.executeStagedProposal(proposal),
+          LIVE_SUBMISSION_TIMEOUT_MS,
+          "CLOB submission result timed out."
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === "CLOB submission result timed out."
+        ) {
+          throw toSubmissionUnknownError(error);
+        }
+        throw error;
+      }
       response = submission.response;
       localOrder = submission.evidence;
       boundOrderId = response.orderID;
@@ -854,9 +870,10 @@ export class GuardedLiveTradingAdapter implements LiveTradingPort {
           throw new SafeExternalServiceError(
             "The order response arrived after the emergency lock activated.",
             {
-              code: "SUBMISSION_ABORTED_AFTER_POST",
-              service: "local",
-              retryable: false
+            code: "SUBMISSION_ABORTED_AFTER_POST",
+            service: "local",
+              retryable: false,
+              submissionMayHaveReachedCLOB: true
             }
           );
         }
@@ -1214,6 +1231,7 @@ function parseBaseUnits(value: string, label: string): bigint {
 }
 
 function sanitizeOpenOrder(order: OpenOrder): Record<string, unknown> {
+  const raw = order as unknown as Record<string, unknown>;
   return {
     id: order.id,
     status: order.status,
@@ -1228,7 +1246,8 @@ function sanitizeOpenOrder(order: OpenOrder): Record<string, unknown> {
     createdAt: order.created_at,
     expiration: order.expiration,
     orderType: order.order_type,
-    associateTrades: order.associate_trades
+    associateTrades: order.associate_trades,
+    ...(typeof raw.metadata === "string" ? { metadata: raw.metadata } : {})
   };
 }
 

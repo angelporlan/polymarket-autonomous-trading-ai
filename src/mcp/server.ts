@@ -280,7 +280,7 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
     {
       title: "Prepare trading session",
       description:
-        "Calculate current safe session capacity and issue a short-lived one-time challenge for local human authorization. This does not activate a session.",
+        "Calculate current safe session capacity and prepare a short-lived session authorization. The separate native authorization command asks for the amount and local user presence; this does not activate a session.",
       inputSchema: prepareTradingSessionInputSchema,
       outputSchema: prepareTradingSessionOutputSchema,
       annotations: READ_ANNOTATIONS

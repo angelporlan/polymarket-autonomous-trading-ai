@@ -244,13 +244,13 @@ describe("guarded live adapter lifecycle", () => {
 
     await expect(
       harness.adapter.submitGtd(approvedProposal(), async () => {})
-    ).rejects.toMatchObject({ code: "CLOB_ORDER_SUBMISSION_ERROR" });
+    ).rejects.toMatchObject({ code: "CLOB_ORDER_SUBMISSION_UNKNOWN" });
 
     expect(lockWasActiveAtCancellation).toBe(true);
     expect(harness.rawClients[0]?.cancelAll).toHaveBeenCalledTimes(1);
     expect(harness.database.getEmergencyStop()).toMatchObject({
       active: true,
-      reason: "CLOB_ORDER_SUBMISSION_ERROR"
+      reason: "CLOB_ORDER_SUBMISSION_UNKNOWN"
     });
     harness.adapter.close();
   });

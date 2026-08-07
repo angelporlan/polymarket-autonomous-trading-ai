@@ -29,8 +29,17 @@ export interface ResearchBundleInput {
   estimatedProbabilityMicros: bigint;
   eventVolatilityClass: EventVolatilityClass;
   requestedUrls: string[];
+  sourceEvidence: ResearchSourceEvidenceInput[];
   rationale: string;
   counterRationale: string;
+}
+
+export interface ResearchSourceEvidenceInput {
+  requestedUrl: string;
+  supportedClaims: string[];
+  contradictedClaims: string[];
+  quotedFacts: string[];
+  probabilityImpactMicros: bigint;
 }
 
 export interface ResearchVerifierOptions {
@@ -72,6 +81,12 @@ export class ResearchVerifier {
     const verifiedSources: VerifiedSource[] = [];
     const domains = new Set<string>();
     const seenUrls = new Set<string>();
+    const sourceEvidenceByUrl = new Map(
+      input.sourceEvidence.map((candidate) => [
+        validatePublicSourceUrl(candidate.requestedUrl),
+        candidate
+      ])
+    );
 
     for (const requestedUrl of input.requestedUrls) {
       const normalizedRequestedUrl = validatePublicSourceUrl(requestedUrl);
@@ -80,6 +95,10 @@ export class ResearchVerifier {
       }
       seenUrls.add(normalizedRequestedUrl);
       const fetched = await this.fetchSource(normalizedRequestedUrl);
+      const sourceEvidence = sourceEvidenceByUrl.get(normalizedRequestedUrl);
+      if (sourceEvidence === undefined) {
+        throw new ResearchVerificationError("RESEARCH_SOURCE_EVIDENCE_MISSING");
+      }
       const source = parseVerifiedSource(
         normalizedRequestedUrl,
         fetched.finalUrl,
@@ -88,13 +107,14 @@ export class ResearchVerifier {
         fetched.body,
         nowMs
       );
+      const semanticEvidence = verifySourceEvidence(sourceEvidence, fetched.body);
       if (nowMs - source.publishedAtMs > maxAgeMs) {
         throw new ResearchVerificationError(
           `RESEARCH_SOURCE_TOO_OLD: ${source.finalUrl}`
         );
       }
       domains.add(source.registrableDomain);
-      verifiedSources.push(source);
+      verifiedSources.push({ ...source, ...semanticEvidence });
     }
 
     if (domains.size < 2) {
@@ -108,7 +128,10 @@ export class ResearchVerifier {
       estimatedProbabilityMicros: input.estimatedProbabilityMicros,
       eventVolatilityClass: input.eventVolatilityClass,
       createdAtMs: nowMs,
-      expiresAtMs: nowMs + maxAgeMs,
+      expiresAtMs: Math.min(
+        nowMs + maxAgeMs,
+        ...verifiedSources.map((source) => source.publishedAtMs + maxAgeMs)
+      ),
       sources: verifiedSources,
       rationale: input.rationale.trim(),
       counterRationale: input.counterRationale.trim()
@@ -285,7 +308,13 @@ function parseVerifiedSource(
   contentType: string,
   body: string,
   nowMs: number
-): VerifiedSource {
+): Omit<
+  VerifiedSource,
+  | "supportedClaims"
+  | "contradictedClaims"
+  | "quotedFactHashes"
+  | "probabilityImpactMicros"
+> {
   const final = validatePublicSourceUrl(finalUrl);
   const url = new URL(final);
   const title = extractTitle(body);
@@ -309,6 +338,35 @@ function parseVerifiedSource(
     contentType,
     excerptHash: sha256(normalizedText.slice(0, 500)),
     responseBodyHash: sha256(body)
+  };
+}
+
+function verifySourceEvidence(
+  evidence: ResearchSourceEvidenceInput,
+  body: string
+): Pick<
+  VerifiedSource,
+  | "supportedClaims"
+  | "contradictedClaims"
+  | "quotedFactHashes"
+  | "probabilityImpactMicros"
+> {
+  const normalizedBody = stripHtml(body)
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLowerCase();
+  const quotedFactHashes = evidence.quotedFacts.map((quote) => {
+    const normalizedQuote = quote.replace(/\s+/gu, " ").trim().toLowerCase();
+    if (!normalizedBody.includes(normalizedQuote)) {
+      throw new ResearchVerificationError("RESEARCH_QUOTED_FACT_NOT_FOUND");
+    }
+    return sha256(normalizedQuote);
+  });
+  return {
+    supportedClaims: evidence.supportedClaims.map((claim) => claim.trim()),
+    contradictedClaims: evidence.contradictedClaims.map((claim) => claim.trim()),
+    quotedFactHashes,
+    probabilityImpactMicros: evidence.probabilityImpactMicros
   };
 }
 
@@ -390,6 +448,28 @@ function validateBundleInput(input: ResearchBundleInput): void {
   }
   if (input.requestedUrls.length < 2 || input.requestedUrls.length > 5) {
     throw new ResearchVerificationError("RESEARCH_NEEDS_TWO_SOURCES");
+  }
+  if (
+    input.sourceEvidence.length !== input.requestedUrls.length ||
+    input.sourceEvidence.some(
+      (evidence) =>
+        evidence.supportedClaims.length + evidence.contradictedClaims.length === 0 ||
+        evidence.quotedFacts.length === 0 ||
+        evidence.probabilityImpactMicros < -1_000_000n ||
+        evidence.probabilityImpactMicros > 1_000_000n
+    )
+  ) {
+    throw new ResearchVerificationError("RESEARCH_SOURCE_EVIDENCE_INVALID");
+  }
+  const normalizedUrls = input.requestedUrls.map(validatePublicSourceUrl);
+  const evidenceUrls = input.sourceEvidence.map((evidence) =>
+    validatePublicSourceUrl(evidence.requestedUrl)
+  );
+  if (
+    new Set(evidenceUrls).size !== evidenceUrls.length ||
+    normalizedUrls.some((url) => !evidenceUrls.includes(url))
+  ) {
+    throw new ResearchVerificationError("RESEARCH_SOURCE_EVIDENCE_MISMATCH");
   }
   if (input.rationale.trim().length < 20 || input.counterRationale.trim().length < 20) {
     throw new ResearchVerificationError("RESEARCH_RATIONALE_INVALID");

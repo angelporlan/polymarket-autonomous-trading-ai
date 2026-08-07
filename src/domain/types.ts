@@ -75,6 +75,10 @@ export interface VerifiedSource {
   contentType: string;
   excerptHash: string;
   responseBodyHash: string;
+  supportedClaims: string[];
+  contradictedClaims: string[];
+  quotedFactHashes: string[];
+  probabilityImpactMicros: bigint;
 }
 
 export interface ResearchBundle {
@@ -213,6 +217,8 @@ export interface PositionRecord {
   sharesMicros: bigint;
   averagePriceMicros: bigint;
   evidenceQuality: LegacyEvidenceQuality;
+  entryFeesMicros: bigint | null;
+  entryTransactionHashesJson: string;
   entryProbabilityMicros: bigint | null;
   entryEdgeMicros: bigint | null;
   openedAtMs: number | null;
@@ -221,6 +227,9 @@ export interface PositionRecord {
   lastEstimatedProbabilityMicros: bigint | null;
   lastResearchBundleId: string | null;
   sourcesJson: string;
+  researchRequiredSinceMs: number | null;
+  researchRequiredAtPriceMicros: bigint | null;
+  minimumResearchCreatedAtMs: number | null;
   exitState: ExitState;
   activeExitProposalId: string | null;
   activeExitOrderId: string | null;

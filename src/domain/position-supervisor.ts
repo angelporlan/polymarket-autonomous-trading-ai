@@ -21,7 +21,8 @@ export function evaluatePositionExitPolicy(
   currentEstimatedProbabilityMicros: bigint | null,
   currentResearchBundleId: string | null,
   marketEndTimeMs: number,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  currentResearchBundleCreatedAtMs: number | null = null
 ): EvaluationAction {
   const recommendedOrderSide: OrderSide = position.side === "BUY" ? "SELL" : "BUY";
 
@@ -34,6 +35,20 @@ export function evaluatePositionExitPolicy(
       shouldExit: false,
       triggerReason: "LEGACY_UNVERIFIED",
       explanation: "Position lacks verified local entry evidence; manual verification required.",
+      recommendedOrderSide
+    };
+  }
+
+  const researchRequired = position.minimumResearchCreatedAtMs !== null;
+  const researchSatisfied =
+    researchRequired &&
+    currentResearchBundleCreatedAtMs !== null &&
+    currentResearchBundleCreatedAtMs >= position.minimumResearchCreatedAtMs!;
+  if (researchRequired && !researchSatisfied) {
+    return {
+      shouldExit: false,
+      triggerReason: "RESEARCH_REQUIRED",
+      explanation: "A fresh research bundle created after the price shock is required before evaluating the position.",
       recommendedOrderSide
     };
   }
@@ -94,7 +109,8 @@ export function evaluatePositionExitPolicy(
   if (
     position.lastMarketPriceMicros > 0n &&
     absDifference(currentPriceMicros, position.lastMarketPriceMicros) * 100n >=
-      position.lastMarketPriceMicros * 20n
+    position.lastMarketPriceMicros * 20n &&
+    !researchSatisfied
   ) {
     return {
       shouldExit: false,

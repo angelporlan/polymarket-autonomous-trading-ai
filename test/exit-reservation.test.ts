@@ -85,6 +85,37 @@ describe("live EXIT reservations", () => {
     database.close();
   });
 
+  it("keeps the claim, proposal hash, and exit reservation after an uncertain POST", () => {
+    const database = new TradingDatabase(":memory:");
+    const proposal = exitProposal();
+    database.stageProposal(proposal, 10n * PUSD_SCALE);
+    expect(
+      database.claimAutonomousExecution(proposal.id, proposal.hash, null, NOW_MS + 1)
+    ).toBe(true);
+
+    database.markExecutionSubmissionUnknown(
+      proposal.id,
+      proposal.hash,
+      JSON.stringify({
+        submissionUnknown: true,
+        code: "CLOB_ORDER_SUBMISSION_UNKNOWN"
+      }),
+      NOW_MS + 2
+    );
+
+    expect(database.getExecution(proposal.id)).toMatchObject({
+      proposalHash: proposal.hash,
+      clobOrderId: null,
+      status: "SUBMISSION_UNKNOWN"
+    });
+    expect(database.getProposal(proposal.id)?.status).toBe("EXECUTING");
+    expect(database.getReservedExitShares(proposal.market.tokenId, NOW_MS + 2)).toBe(
+      10n * PUSD_SCALE
+    );
+    expect(database.countAuditEvents("EXECUTION_SUBMISSION_UNKNOWN")).toBe(1);
+    database.close();
+  });
+
   it("does not mark a position CLOSING when the exit execution is rejected", async () => {
     const database = new TradingDatabase(":memory:");
     const market = marketFixture(NOW_MS);
@@ -120,6 +151,8 @@ describe("live EXIT reservations", () => {
       sharesMicros: 2n * PUSD_SCALE,
       averagePriceMicros: 500_000n,
       evidenceQuality: "VERIFIED",
+      entryFeesMicros: 0n,
+      entryTransactionHashesJson: "[]",
       entryProbabilityMicros: 550_000n,
       entryEdgeMicros: 50_000n,
       openedAtMs: NOW_MS - 2 * 24 * 60 * 60_000,
@@ -128,6 +161,9 @@ describe("live EXIT reservations", () => {
       lastEstimatedProbabilityMicros: null,
       lastResearchBundleId: null,
       sourcesJson: "[]",
+      researchRequiredSinceMs: null,
+      researchRequiredAtPriceMicros: null,
+      minimumResearchCreatedAtMs: null,
       exitState: "HOLDING",
       activeExitProposalId: null,
       activeExitOrderId: null
@@ -135,7 +171,7 @@ describe("live EXIT reservations", () => {
 
     const service = new TradingService({
       profileAddress: portfolio.profileAddress,
-      liveEnvironmentEnabled: true,
+      liveEnvironmentEnabled: false,
       database,
       marketData: {
         profileExists: async () => true,
@@ -222,9 +258,9 @@ describe("live EXIT reservations", () => {
     });
 
     await service.supervisePositions();
-    expect(database.getPositionRecord(market.tokenId)?.exitState).not.toBe(
-      "CLOSING"
-    );
+    expect(database.getPositionRecord(market.tokenId)?.exitState).toBe("HOLDING");
+    expect(service.stageOrder).not.toHaveBeenCalled();
+    expect(database.countAuditEvents("SHADOW_EXIT_RECOMMENDED")).toBe(1);
     database.close();
   });
 });

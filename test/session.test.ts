@@ -55,7 +55,7 @@ describe("TradingSession", () => {
     expect(expiredCheck.reason).toContain("has expired");
   });
 
-  it("requires one local challenge authorization and consumes it atomically", () => {
+  it("requires one native user-presence authorization and consumes it atomically", () => {
     const nowMs = Date.now();
     const database = new TradingDatabase(":memory:");
     const challenge = "ABC123456789XYZ0";
@@ -72,9 +72,13 @@ describe("TradingSession", () => {
     database.savePendingTradingSession(pending);
 
     database.recordSessionAuthorization(
-      pending.id,
-      5n * PUSD_SCALE,
-      challenge,
+      {
+        pendingSessionId: pending.id,
+        amountMicros: 5n * PUSD_SCALE,
+        attestationNonce: "a".repeat(64),
+        attestationSource: "macos-native-user-presence",
+        confirmedAtMs: nowMs + 1
+      },
       nowMs + 1
     );
     const authorization = database.getSessionAuthorization(pending.id);
@@ -82,6 +86,8 @@ describe("TradingSession", () => {
       pendingSessionId: pending.id,
       amountMicros: 5n * PUSD_SCALE,
       challengeHash: hashSessionChallenge(challenge),
+      attestationNonce: "a".repeat(64),
+      attestationSource: "macos-native-user-presence",
       consumedAtMs: null
     });
 
@@ -98,16 +104,20 @@ describe("TradingSession", () => {
     );
     expect(() =>
       database.recordSessionAuthorization(
-        pending.id,
-        5n * PUSD_SCALE,
-        challenge,
+        {
+          pendingSessionId: pending.id,
+          amountMicros: 5n * PUSD_SCALE,
+          attestationNonce: "a".repeat(64),
+          attestationSource: "macos-native-user-presence",
+          confirmedAtMs: nowMs + 4
+        },
         nowMs + 4
       )
     ).toThrow(/already authorized|already been used/i);
     database.close();
   });
 
-  it("rejects a wrong challenge, an excessive amount, and a second active session", () => {
+  it("rejects invalid native attestations, an excessive amount, and a second active session", () => {
     const nowMs = Date.now();
     const database = new TradingDatabase(":memory:");
     const pending = createPendingTradingSession({
@@ -123,25 +133,37 @@ describe("TradingSession", () => {
     database.savePendingTradingSession(pending);
     expect(() =>
       database.recordSessionAuthorization(
-        pending.id,
-        1n * PUSD_SCALE,
-        "WRONG123456789XYZ",
+        {
+          pendingSessionId: pending.id,
+          amountMicros: 1n * PUSD_SCALE,
+          attestationNonce: "not-a-nonce",
+          attestationSource: "macos-native-user-presence",
+          confirmedAtMs: nowMs + 1
+        },
         nowMs + 1
       )
-    ).toThrow("Trading session challenge mismatch.");
+    ).toThrow("Invalid native trading session attestation.");
     expect(() =>
       database.recordSessionAuthorization(
-        pending.id,
-        6n * PUSD_SCALE,
-        "ABC123456789XYZ0",
+        {
+          pendingSessionId: pending.id,
+          amountMicros: 6n * PUSD_SCALE,
+          attestationNonce: "b".repeat(64),
+          attestationSource: "macos-native-user-presence",
+          confirmedAtMs: nowMs + 1
+        },
         nowMs + 1
       )
     ).toThrow(/exceeds the current maximum/);
 
     database.recordSessionAuthorization(
-      pending.id,
-      5n * PUSD_SCALE,
-      "ABC123456789XYZ0",
+      {
+        pendingSessionId: pending.id,
+        amountMicros: 5n * PUSD_SCALE,
+        attestationNonce: "b".repeat(64),
+        attestationSource: "macos-native-user-presence",
+        confirmedAtMs: nowMs + 1
+      },
       nowMs + 1
     );
     expect(database.activateTradingSession(pending.id, nowMs + 2)).not.toBeNull();
@@ -159,9 +181,13 @@ describe("TradingSession", () => {
     database.savePendingTradingSession(secondPending);
     expect(() =>
       database.recordSessionAuthorization(
-        secondPending.id,
-        1n * PUSD_SCALE,
-        "DEF123456789XYZ0",
+        {
+          pendingSessionId: secondPending.id,
+          amountMicros: 1n * PUSD_SCALE,
+          attestationNonce: "c".repeat(64),
+          attestationSource: "macos-native-user-presence",
+          confirmedAtMs: nowMs + 4
+        },
         nowMs + 4
       )
     ).toThrow("An active trading session already exists.");

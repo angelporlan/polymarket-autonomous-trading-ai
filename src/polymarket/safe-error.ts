@@ -4,6 +4,7 @@ export interface SafeErrorOptions {
   code?: string;
   service?: string;
   fallbackMessage?: string;
+  submissionMayHaveReachedCLOB?: boolean;
 }
 
 /**
@@ -17,6 +18,7 @@ export class SafeExternalServiceError extends Error {
   readonly service: string | undefined;
   readonly status: number | undefined;
   readonly retryable: boolean;
+  readonly submissionMayHaveReachedCLOB: boolean;
 
   constructor(
     message: string,
@@ -25,6 +27,7 @@ export class SafeExternalServiceError extends Error {
       service?: string;
       status?: number;
       retryable?: boolean;
+      submissionMayHaveReachedCLOB?: boolean;
     }
   ) {
     super(message);
@@ -33,6 +36,8 @@ export class SafeExternalServiceError extends Error {
     this.service = options.service;
     this.status = options.status;
     this.retryable = options.retryable ?? isRetryableStatus(options.status);
+    this.submissionMayHaveReachedCLOB =
+      options.submissionMayHaveReachedCLOB === true;
   }
 }
 
@@ -56,8 +61,37 @@ export function toSafeExternalError(
     code: options.code ?? "EXTERNAL_SERVICE_ERROR",
     ...(options.service === undefined ? {} : { service: options.service }),
     ...(status === undefined ? {} : { status }),
-    retryable: isRetryableStatus(status) || isRetryableNetworkError(error)
+    retryable: isRetryableStatus(status) || isRetryableNetworkError(error),
+    submissionMayHaveReachedCLOB: options.submissionMayHaveReachedCLOB === true
   });
+}
+
+export function toSubmissionUnknownError(error: unknown): SafeExternalServiceError {
+  const safe = toSafeExternalError(error, {
+    code: "CLOB_ORDER_SUBMISSION_UNKNOWN",
+    service: "clob",
+    fallbackMessage: "The CLOB submission result is unknown; reconciliation is required."
+  });
+  if (safe.submissionMayHaveReachedCLOB) {
+    return safe;
+  }
+  return new SafeExternalServiceError(
+    "The CLOB submission result is unknown; reconciliation is required.",
+    {
+      code: "CLOB_ORDER_SUBMISSION_UNKNOWN",
+      service: safe.service ?? "clob",
+      ...(safe.status === undefined ? {} : { status: safe.status }),
+      retryable: false,
+      submissionMayHaveReachedCLOB: true
+    }
+  );
+}
+
+export function isSubmissionUnknown(error: unknown): boolean {
+  return (
+    error instanceof SafeExternalServiceError &&
+    error.submissionMayHaveReachedCLOB === true
+  );
 }
 
 export function sanitizeErrorMessage(message: string): string {

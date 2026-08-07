@@ -16,7 +16,7 @@ El servidor expone por `stdio` estas herramientas MCP:
 | `get_market_snapshot` | Reglas, fuente de resolución, libro, tick, fees, liquidez y geoblock. |
 | `get_risk_status` | Límites inmutables, exposición, PnL diario y estado del piloto. |
 | `get_order_status` | Último estado, fills y fees validados y guardados en el ledger local. |
-| `prepare_trading_session` | Calcula capacidad y emite un challenge efímero; no activa una sesión. |
+| `prepare_trading_session` | Calcula capacidad y prepara una autorización efímera; no activa una sesión ni expone un challenge. |
 | `activate_trading_session` | Consume una autorización local única y activa su presupuesto exacto. |
 | `get_trading_session` | Presupuesto autorizado, uso, restante, estado y expiración de la sesión. |
 | `stage_order` | Valida y persiste una propuesta inmutable; no firma ni envía. |
@@ -142,7 +142,7 @@ Scripts declarados en `package.json`:
 | `npm run test:watch` | Pruebas en modo interactivo. |
 | `npm run keychain:build` | Compila `bin/polymarket-keychain-helper`. |
 | `npm run onboard` | Alta local y comprobación de identidad/Keychain. |
-| `npm run session:authorize -- --pending [id] --amount [pUSD] --challenge [challenge]` | Registra la confirmación local única de una sesión preparada. |
+| `npm run session:authorize -- --pending [id]` | Abre el helper nativo macOS, solicita importe y presencia local, y registra la autorización única. |
 | `npm run smoke` | Comprobaciones de conectividad sin enviar órdenes. |
 | `npm run ledger:export -- [directorio] [quote.json]` | Exporta el ledger completo a JSON, los eventos a CSV y el resumen contable pUSD/EUR a `accounting.csv`. El quote EUR es opcional; sin él, EUR queda explícitamente no disponible. |
 
@@ -162,7 +162,7 @@ Las únicas variables admitidas son de configuración no secreta:
 | `POLYGON_RPC_URL` | `https://polygon-rpc.com` | RPC público de respaldo para modos sin live. Debe ser un origen HTTPS sin ruta, query ni credenciales. |
 | `POLYGON_RPC_URLS` | vacío | En live: dos orígenes HTTPS públicos, sin credenciales y con hosts distintos, separados por coma. |
 
-Puedes exportarlas en el entorno que inicia Codex o ajustar la tabla `env` de `.codex/config.toml`. El archivo `.env.example` es solo una plantilla: el proyecto no carga `.env` automáticamente. Los comandos CLI (`onboard`, `smoke` y `ledger:export`) leen el entorno del shell y no la tabla del TOML, por lo que deben recibir exactamente la misma dirección, ruta de SQLite y configuración RPC no secreta que el servidor MCP. La dirección de perfil es pública; aun así, no pongas en esos lugares una clave privada, secret, passphrase ni credencial L2.
+Puedes exportarlas en el entorno que inicia Codex o ajustar la tabla `env` de `.codex/config.toml`. El archivo `.env.example` es solo una plantilla; `loadConfig()` carga `.env` cuando recibe el entorno normal del proceso. Los comandos CLI (`onboard`, `smoke`, `ledger:export` y `session:authorize`) leen ese mismo entorno del shell y no la tabla del TOML, por lo que deben recibir exactamente la misma dirección, ruta de SQLite y configuración RPC no secreta que el servidor MCP. La dirección de perfil es pública; aun así, no pongas en esos lugares una clave privada, secret, passphrase ni credencial L2.
 
 La clave social nunca debe aparecer en:
 
@@ -203,7 +203,8 @@ Para iniciar una sesión de trading, el agente debe preparar primero la capacida
 ```text
 prepare_trading_session
     ↓
-npm run session:authorize -- --pending <id> --amount <pUSD> --challenge <challenge>
+npm run session:authorize -- --pending <id>
+  (ventana nativa macOS: importe + LocalAuthentication)
     ↓
 activate_trading_session
 ```
@@ -236,7 +237,9 @@ SQLite guarda propuestas, sesiones, ejecuciones, operaciones paper, estados pers
 
 La exportación contable conserva pUSD como unidad primaria. Para añadir una conversión EUR reproducible, pasa un JSON de cotización pública con `baseCurrency: "pUSD"`, `quoteCurrency: "EUR"`, `rateEurPerPusd`, `observedAt`, `validUntil`, `sourceName` y una `sourceUrl` HTTPS. Las cotizaciones ausentes, caducadas o inválidas dejan EUR como `UNAVAILABLE`; nunca se sustituye silenciosamente por una tasa aproximada.
 
-La idempotencia se apoya en `proposalId`, hash exacto y reclamación autónoma atómica de la ejecución. Un reinicio invalida propuestas en ejecución e interrumpe ejecuciones pendientes de forma segura. `emergency_stop` se persiste antes de intentar cancelaciones: si la API falla, el bloqueo sigue activo.
+La idempotencia se apoya en `proposalId`, hash exacto y reclamación autónoma atómica de la ejecución. Un POST incierto queda como `SUBMISSION_UNKNOWN`, conserva claim, hash y reserva, activa el lock y exige reconciliación antes de cualquier reintento; un reinicio no lo convierte en una propuesta nueva. `emergency_stop` se persiste antes de intentar cancelaciones: si la API falla, el bloqueo sigue activo.
+
+Con `POLYMARKET_LIVE_ENABLED=false`, `supervisePositions` funciona como shadow: lee la cartera pública y registra `SHADOW_EXIT_RECOMMENDED`, pero no crea paper exits ni muta `PositionRecord` live. Las salidas live son reduce-only: no requieren sesión ni paper gate, aunque mantienen identidad, geoblock, snapshot, posición liquidada y bloqueo de emergencia.
 
 Antes de confiar en el ledger:
 

@@ -12,6 +12,7 @@ private let allowedService = "codex-polymarket-guarded"
 private let allowedAccounts: Set<String> = [
     "social-private-key.v1",
     "l2-credentials.v1",
+    "session-authorization.v1",
 ]
 private let maximumFrameBytes = 128 * 1024
 private let maximumSecretBytes = 64 * 1024
@@ -38,6 +39,7 @@ private enum HelperCode: String {
 private enum HelperOperation: String {
     case status
     case importSocialKey = "import-social-key"
+    case authorizeSession = "authorize-session"
     case put
     case read
 }
@@ -151,6 +153,10 @@ private func readRequest() throws -> Request {
         guard payload.isEmpty else {
             throw FixedHelperError(code: .badRequest)
         }
+    case .authorizeSession:
+        guard account == "session-authorization.v1", !payload.isEmpty else {
+            throw FixedHelperError(code: .badRequest)
+        }
     case .put:
         guard !payload.isEmpty else {
             throw FixedHelperError(code: .invalidSecret)
@@ -189,6 +195,9 @@ private func perform(_ request: Request) throws -> (payload: Data, exists: Bool?
         )
         return (Data(), true)
 
+    case .authorizeSession:
+        return (try authorizeTradingSession(request.payload), true)
+
     case .put:
         guard request.account == "l2-credentials.v1" else {
             throw FixedHelperError(code: .unsupported)
@@ -214,6 +223,127 @@ private func perform(_ request: Request) throws -> (payload: Data, exists: Bool?
             reason: reason
         )
         return (secret, true)
+    }
+}
+
+private func authorizeTradingSession(_ payload: Data) throws -> Data {
+    guard
+        let json = try JSONSerialization.jsonObject(with: payload) as? [String: Any],
+        let pendingSessionId = json["pendingSessionId"] as? String,
+        isSafeIdentifier(pendingSessionId),
+        let executionMode = json["executionMode"] as? String,
+        executionMode == "paper" || executionMode == "live",
+        let maximumAuthorizableMicros = json["maximumAuthorizableMicros"] as? String,
+        let maximumMicros = parseMicros(maximumAuthorizableMicros),
+        maximumMicros > 0,
+        let expiresAtMs = json["expiresAtMs"] as? Int64
+    else {
+        throw FixedHelperError(code: .badRequest)
+    }
+
+    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+    guard nowMs <= expiresAtMs else {
+        throw FixedHelperError(code: .authenticationCancelled)
+    }
+
+    let amountField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 430, height: 24))
+    amountField.placeholderString = "Amount in pUSD (maximum shown below)"
+    amountField.isAutomaticTextCompletionEnabled = false
+
+    let alert = NSAlert()
+    alert.alertStyle = .informational
+    alert.messageText = "Authorize \(executionMode) trading session"
+    alert.informativeText =
+        "Enter the maximum pUSD budget for this session. The native authorization is valid once and expires with the prepared session.\nMaximum: \(formatMicros(maximumMicros)) pUSD"
+    alert.accessoryView = amountField
+    alert.addButton(withTitle: "Authorize session")
+    alert.addButton(withTitle: "Cancel")
+    alert.window.initialFirstResponder = amountField
+
+    let result = alert.runModal()
+    guard result == .alertFirstButtonReturn else {
+        amountField.stringValue = ""
+        throw FixedHelperError(code: .authenticationCancelled)
+    }
+    let enteredAmount = amountField.stringValue
+    amountField.stringValue = ""
+    guard let amountMicros = parseMicros(enteredAmount), amountMicros > 0 else {
+        throw FixedHelperError(code: .badRequest)
+    }
+    guard amountMicros <= maximumMicros else {
+        throw FixedHelperError(code: .badRequest)
+    }
+
+    try requireUserPresence()
+
+    var nonce = Data(repeating: 0, count: 32)
+    defer { nonce.resetBytes(in: 0..<nonce.count) }
+    let randomStatus = nonce.withUnsafeMutableBytes { buffer in
+        SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
+    }
+    guard randomStatus == errSecSuccess else {
+        throw FixedHelperError(code: .internalError)
+    }
+
+    let response: [String: Any] = [
+        "pendingSessionId": pendingSessionId,
+        "amountMicros": String(amountMicros),
+        "confirmedAtMs": Int64(Date().timeIntervalSince1970 * 1000),
+        "attestationNonce": hex(nonce),
+        "source": "macos-native-user-presence",
+    ]
+    return try JSONSerialization.data(withJSONObject: response, options: [])
+}
+
+private func requireUserPresence() throws {
+    let context = LAContext()
+    context.localizedReason = "Authorize one Polymarket trading session"
+
+    var result: (Bool, Error?)?
+    context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: context.localizedReason) {
+        success, error in
+        result = (success, error)
+    }
+    while result == nil {
+        RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+    }
+    guard result?.0 == true else {
+        if let error = result?.1 as NSError?, error.code == LAError.userCancel.rawValue {
+            throw FixedHelperError(code: .authenticationCancelled)
+        }
+        throw FixedHelperError(code: .authenticationFailed)
+    }
+}
+
+private func parseMicros(_ value: String) -> UInt64? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    let parts = trimmed.split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count <= 2, !parts.isEmpty else { return nil }
+    let wholePart = String(parts[0])
+    guard !wholePart.isEmpty, wholePart.allSatisfy({ $0.isNumber }) else { return nil }
+    let fractionPart = parts.count == 2 ? String(parts[1]) : ""
+    guard fractionPart.count <= 6, fractionPart.allSatisfy({ $0.isNumber }) else { return nil }
+    guard let whole = UInt64(wholePart) else { return nil }
+    let fraction = UInt64(fractionPart.padding(toLength: 6, withPad: "0", startingAt: 0)) ?? 0
+    let scale: UInt64 = 1_000_000
+    guard whole <= (UInt64.max - fraction) / scale else { return nil }
+    return whole * scale + fraction
+}
+
+private func formatMicros(_ micros: UInt64) -> String {
+    let whole = micros / 1_000_000
+    let fraction = micros % 1_000_000
+    if fraction == 0 { return String(whole) }
+    return "\(whole).\(String(format: "%06llu", fraction).replacingOccurrences(of: "0+$", with: "", options: .regularExpression))"
+}
+
+private func hex(_ data: Data) -> String {
+    data.map { String(format: "%02x", $0) }.joined()
+}
+
+private func isSafeIdentifier(_ value: String) -> Bool {
+    !value.isEmpty && value.utf8.count <= 160 && value.unicodeScalars.allSatisfy { scalar in
+        scalar.value >= 0x20 && scalar.value != 0x7f
     }
 }
 

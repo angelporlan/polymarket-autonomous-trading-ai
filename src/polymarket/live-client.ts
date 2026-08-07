@@ -27,6 +27,7 @@ import { parseApiDecimalToMicros } from "./public-client.js";
 import {
   SafeExternalServiceError,
   sanitizeErrorMessage,
+  toSubmissionUnknownError,
   toSafeExternalError
 } from "./safe-error.js";
 
@@ -276,7 +277,9 @@ export class PolymarketLiveClient {
     }
 
     let response: OrderResponse;
+    let postStarted = false;
     try {
+      postStarted = true;
       response = await this.client.postOrder(
         signedOrder,
         OrderType.GTD,
@@ -285,11 +288,13 @@ export class PolymarketLiveClient {
       );
     } catch (error) {
       process.stderr.write("[polymarket-live] CLOB_ORDER_SUBMISSION_ERROR\n");
-      throw toSafeExternalError(error, {
-        code: "CLOB_ORDER_SUBMISSION_ERROR",
-        service: "clob",
-        fallbackMessage: "The CLOB rejected the order submission."
-      });
+      throw postStarted
+        ? toSubmissionUnknownError(error)
+        : toSafeExternalError(error, {
+            code: "CLOB_ORDER_SUBMISSION_ERROR",
+            service: "clob",
+            fallbackMessage: "The CLOB rejected the order submission."
+          });
     }
 
     if (
@@ -306,14 +311,7 @@ export class PolymarketLiveClient {
         response.errorMsg.length > 0
           ? response.errorMsg
           : "The CLOB did not confirm the order.";
-      throw toSafeExternalError(
-        { message },
-        {
-          code: "CLOB_ORDER_REJECTED",
-          service: "clob",
-          fallbackMessage: "The CLOB rejected the order."
-        }
-      );
+      throw toSubmissionUnknownError({ message });
     }
 
     return { response, evidence };

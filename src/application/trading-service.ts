@@ -29,7 +29,13 @@ import {
   type ResearchBundle,
   type UserTradeActivity
 } from "../domain/types.js";
-import { validateEvidenceSources } from "../domain/source-validator.js";
+import {
+  CRISIS_SOURCE_AGE_MS,
+  extractRegistrableDomain,
+  isRecognizedEvidenceDomain,
+  MAX_SOURCE_AGE_MS,
+  validateEvidenceSources
+} from "../domain/source-validator.js";
 import {
   createPendingTradingSession,
   hashSessionChallenge,
@@ -57,6 +63,10 @@ import {
   parseClobPrice,
   parseClobTimestampMs
 } from "../polymarket/reconciliation.js";
+import {
+  isSubmissionUnknown,
+  SafeExternalServiceError
+} from "../polymarket/safe-error.js";
 import type { TradingDatabase } from "../storage/database.js";
 import {
   parseWithBigInts,
@@ -174,7 +184,7 @@ export class TradingService {
     }
 
     const existing = this.options.database.getPositionRecord(tokenId);
-    if (existing !== null) {
+    if (existing?.evidenceQuality === "VERIFIED") {
       const stored = this.options.database.getLatestLegacyImportReport(tokenId);
       return {
         imported: false,
@@ -220,13 +230,27 @@ export class TradingService {
       remoteOpenOrderCount,
       ordersChecked
     });
+    if (
+      existing !== null &&
+      higherEvidenceQuality(existing.evidenceQuality, computation.quality) ===
+        existing.evidenceQuality
+    ) {
+      const stored = this.options.database.getLatestLegacyImportReport(tokenId);
+      return {
+        imported: false,
+        report: stored ?? existingPositionReport(existing, this.now())
+      };
+    }
     const importedAtMs = this.now();
+    const quality = higherEvidenceQuality(existing?.evidenceQuality, computation.quality);
     const report: LegacyImportReport = {
       id: randomUUID(),
       tokenId: position.tokenId,
       conditionId: position.conditionId,
       importedAtMs,
-      ...computation
+      ...computation,
+      quality,
+      automaticExitPolicy: automaticExitPolicyForQuality(quality)
     };
     const positionRecord: PositionRecord = {
       tokenId: position.tokenId,
@@ -236,21 +260,28 @@ export class TradingService {
       side: "BUY",
       sharesMicros: position.sizeMicros,
       averagePriceMicros: position.averagePriceMicros,
-      evidenceQuality: computation.quality,
-      entryProbabilityMicros: null,
-      entryEdgeMicros: null,
-      openedAtMs: computation.openedAtMs,
+      evidenceQuality: quality,
+      entryFeesMicros: computation.feesMicros,
+      entryTransactionHashesJson: JSON.stringify(computation.transactionHashes),
+      entryProbabilityMicros: existing?.entryProbabilityMicros ?? null,
+      entryEdgeMicros: existing?.entryEdgeMicros ?? null,
+      openedAtMs: computation.openedAtMs ?? existing?.openedAtMs ?? null,
       lastEvaluatedAtMs: importedAtMs,
       lastMarketPriceMicros: position.currentPriceMicros,
-      lastEstimatedProbabilityMicros: null,
-      lastResearchBundleId: null,
+      lastEstimatedProbabilityMicros: existing?.lastEstimatedProbabilityMicros ?? null,
+      lastResearchBundleId: existing?.lastResearchBundleId ?? null,
       sourcesJson: "[]",
+      researchRequiredSinceMs: existing?.researchRequiredSinceMs ?? null,
+      researchRequiredAtPriceMicros: existing?.researchRequiredAtPriceMicros ?? null,
+      minimumResearchCreatedAtMs: existing?.minimumResearchCreatedAtMs ?? null,
       exitState:
-        computation.quality === "LEGACY_UNVERIFIED"
-          ? "LEGACY_UNVERIFIED"
-          : "HOLDING",
-      activeExitProposalId: null,
-      activeExitOrderId: null
+        existing?.exitState === "CLOSING" || existing?.exitState === "CLOSED"
+          ? existing.exitState
+          : quality === "LEGACY_UNVERIFIED"
+            ? "LEGACY_UNVERIFIED"
+            : "HOLDING",
+      activeExitProposalId: existing?.activeExitProposalId ?? null,
+      activeExitOrderId: existing?.activeExitOrderId ?? null
     };
     this.options.database.saveLegacyImportReport(report);
     this.options.database.savePositionRecord(positionRecord, importedAtMs);
@@ -297,7 +328,7 @@ export class TradingService {
   async prepareTradingSession(input: {
     executionMode: "paper" | "live";
     ttlMs?: number;
-  }): Promise<{ pending: PendingTradingSession; challenge: string }> {
+  }): Promise<{ pending: PendingTradingSession }> {
     const nowMs = this.now();
     if (this.options.database.getActiveTradingSession(input.executionMode, nowMs)) {
       throw new Error("An active trading session already exists.");
@@ -316,7 +347,7 @@ export class TradingService {
       nowMs
     });
     this.options.database.savePendingTradingSession(pending);
-    return { pending, challenge };
+    return { pending };
   }
 
   async activateTradingSession(pendingSessionId: string): Promise<TradingSession> {
@@ -328,7 +359,12 @@ export class TradingService {
     const authorization = this.options.database.getSessionAuthorization(
       pendingSessionId
     );
-    if (!pending || !authorization || authorization.consumedAtMs !== null) {
+    if (
+      !pending ||
+      !authorization ||
+      authorization.attestationSource !== "macos-native-user-presence" ||
+      authorization.consumedAtMs !== null
+    ) {
       throw new Error("Pending trading session is missing, expired, or not locally authorized.");
     }
 
@@ -454,11 +490,11 @@ export class TradingService {
       input.estimatedProbability
     );
 
-    if (input.executionMode === "live") {
+    if (input.executionMode === "live" && input.intent === "ENTRY") {
       const status = await this.getAccountStatus();
       if (status.mode !== "live_ready") {
         throw new Error(
-          "LIVE_AUTONOMY_NOT_READY: Live mode is currently locked or unconfigured. Verify live environment flag, paper gate, signer, and active session budget."
+          "LIVE_AUTONOMY_NOT_READY: Live ENTRY mode is currently locked or unconfigured. Verify live environment flag, paper gate, signer, and active session budget."
         );
       }
     }
@@ -610,7 +646,7 @@ export class TradingService {
     }
 
     try {
-      await this.assertLiveGates();
+      await this.assertLiveGates(proposal.intent);
       await this.revalidateProposal(proposal);
 
       const claimed = this.options.database.claimAutonomousExecution(
@@ -630,7 +666,7 @@ export class TradingService {
       }
 
       const result = await liveTrading.submitGtd(proposal, async () => {
-        await this.assertLiveGates();
+        await this.assertLiveGates(proposal.intent);
         await this.revalidateProposal(proposal);
       });
 
@@ -639,7 +675,15 @@ export class TradingService {
         result.orderId.trim().length === 0 ||
         result.orderId.length > 512
       ) {
-        throw new Error("CLOB_ORDER_ID_MISSING");
+        throw new SafeExternalServiceError(
+          "The CLOB submission result is unknown; reconciliation is required.",
+          {
+            code: "CLOB_ORDER_SUBMISSION_UNKNOWN",
+            service: "clob",
+            retryable: false,
+            submissionMayHaveReachedCLOB: true
+          }
+        );
       }
 
       this.options.database.markExecutionSubmitted({
@@ -659,7 +703,33 @@ export class TradingService {
           : `Polymarket accepted the request with status ${result.status}.`
       };
     } catch (error) {
-      this.options.database.markExecutionFailed(proposal.id, proposal.hash);
+      if (isSubmissionUnknown(error)) {
+        const safe =
+          error instanceof SafeExternalServiceError
+            ? error
+            : new SafeExternalServiceError(
+                "The CLOB submission result is unknown; reconciliation is required.",
+                {
+                  code: "CLOB_ORDER_SUBMISSION_UNKNOWN",
+                  service: "clob",
+                  retryable: false,
+                  submissionMayHaveReachedCLOB: true
+                }
+              );
+        this.options.database.markExecutionSubmissionUnknown(
+          proposal.id,
+          proposal.hash,
+          stringifyWithBigInts({
+            submissionUnknown: true,
+            code: safe.code,
+            message: safe.message,
+            recordedAtMs: this.now()
+          }),
+          this.now()
+        );
+      } else {
+        this.options.database.markExecutionFailed(proposal.id, proposal.hash);
+      }
       this.options.database.setEmergencyStop(
         true,
         safeErrorCode(error),
@@ -691,6 +761,7 @@ export class TradingService {
     const actions: Array<{ tokenId: string; conditionId: string; question: string; shouldExit: boolean; triggerReason: ExitState; explanation: string; recommendedOrderSide: OrderSide }> = [];
     const nowMs = this.now();
 
+    const shadowMode = !this.options.liveEnvironmentEnabled;
     for (const p of portfolio.positions) {
       let rec = this.options.database.getPositionRecord(p.tokenId);
       if (!rec) {
@@ -703,6 +774,8 @@ export class TradingService {
           sharesMicros: p.sizeMicros,
           averagePriceMicros: p.averagePriceMicros,
           evidenceQuality: "LEGACY_UNVERIFIED",
+          entryFeesMicros: null,
+          entryTransactionHashesJson: "[]",
           entryProbabilityMicros: null,
           entryEdgeMicros: null,
           openedAtMs: nowMs,
@@ -711,6 +784,9 @@ export class TradingService {
           lastEstimatedProbabilityMicros: null,
           lastResearchBundleId: null,
           sourcesJson: "[]",
+          researchRequiredSinceMs: null,
+          researchRequiredAtPriceMicros: null,
+          minimumResearchCreatedAtMs: null,
           exitState: "LEGACY_UNVERIFIED",
           activeExitProposalId: null,
           activeExitOrderId: null
@@ -745,8 +821,33 @@ export class TradingService {
         researchBundle?.estimatedProbabilityMicros ?? null,
         researchBundle?.id ?? null,
         p.endTimeMs,
-        nowMs
+        nowMs,
+        researchBundle?.createdAtMs ?? null
       );
+
+      const shadowRecommendation =
+        shadowMode && action.shouldExit;
+      if (action.triggerReason === "RESEARCH_REQUIRED") {
+        rec = {
+          ...rec,
+          researchRequiredSinceMs: rec.researchRequiredSinceMs ?? nowMs,
+          researchRequiredAtPriceMicros:
+            rec.researchRequiredAtPriceMicros ?? p.currentPriceMicros,
+          minimumResearchCreatedAtMs:
+            rec.minimumResearchCreatedAtMs ?? nowMs
+        };
+      } else if (
+        rec.minimumResearchCreatedAtMs !== null &&
+        researchBundle !== null &&
+        researchBundle.createdAtMs >= rec.minimumResearchCreatedAtMs
+      ) {
+        rec = {
+          ...rec,
+          researchRequiredSinceMs: null,
+          researchRequiredAtPriceMicros: null,
+          minimumResearchCreatedAtMs: null
+        };
+      }
 
       rec = {
         ...rec,
@@ -767,6 +868,7 @@ export class TradingService {
 
       if (
         action.shouldExit &&
+        !shadowRecommendation &&
         rec.activeExitProposalId === null &&
         rec.exitState !== "CLOSING" &&
         rec.exitState !== "CLOSED"
@@ -835,7 +937,20 @@ export class TradingService {
         }
       }
 
-      this.options.database.savePositionRecord(rec, nowMs);
+      if (shadowMode) {
+        if (action.shouldExit) {
+          this.options.database.appendAudit("SHADOW_EXIT_RECOMMENDED", p.tokenId, {
+            conditionId: p.conditionId,
+            sharesMicros: p.sizeMicros,
+            currentPriceMicros: p.currentPriceMicros,
+            triggerReason: action.triggerReason,
+            explanation: action.explanation,
+            evaluatedAtMs: nowMs
+          });
+        }
+      } else {
+        this.options.database.savePositionRecord(rec, nowMs);
+      }
       actions.push({
         tokenId: p.tokenId,
         conditionId: p.conditionId,
@@ -889,7 +1004,11 @@ export class TradingService {
     if (!this.options.database.getLiveActivation().active) {
       throw new Error("LOCAL_LIVE_ACTIVATION_MISSING");
     }
-    if (this.options.database.getEmergencyStop().active) {
+    const initialExecutions = this.options.database.listExecutions();
+    const reconciliationOnly = initialExecutions.some(
+      (execution) => execution.status.toUpperCase() === "SUBMISSION_UNKNOWN"
+    );
+    if (this.options.database.getEmergencyStop().active && !reconciliationOnly) {
       throw new Error("EMERGENCY_STOPPED");
     }
     const liveTrading = this.options.liveTrading;
@@ -897,7 +1016,6 @@ export class TradingService {
       throw new Error("LIVE_ADAPTER_NOT_CONFIGURED");
     }
 
-    const executions = this.options.database.listExecutions();
     const activitySinceMs = zonedDayStartMs(
       this.now(),
       "Europe/Madrid"
@@ -915,13 +1033,14 @@ export class TradingService {
     if (geo.blocked || this.now() - geo.checkedAtMs > 5_000) {
       throw new Error("GEOBLOCK_BLOCKED_OR_STALE");
     }
-    if (!risk.dailyPnlKnown) {
+    if (!reconciliationOnly && !risk.dailyPnlKnown) {
       throw new Error("DAILY_PNL_UNAVAILABLE");
     }
-    if (risk.dailyPnlMicros <= -DEFAULT_RISK_POLICY.dailyStopMicros) {
+    if (!reconciliationOnly && risk.dailyPnlMicros <= -DEFAULT_RISK_POLICY.dailyStopMicros) {
       throw new Error("DAILY_STOP");
     }
     if (
+      !reconciliationOnly &&
       risk.coolingDownUntilMs !== null &&
       risk.coolingDownUntilMs > this.now()
     ) {
@@ -931,15 +1050,43 @@ export class TradingService {
       risk.liveTradeCount < DEFAULT_RISK_POLICY.canaryTradeCount
         ? DEFAULT_RISK_POLICY.canaryMaxOpenExposureMicros
         : DEFAULT_RISK_POLICY.pilotMaxOpenExposureMicros;
-    if (risk.totalOpenExposureMicros > maxExposure) {
+    if (!reconciliationOnly && risk.totalOpenExposureMicros > maxExposure) {
       throw new Error("TOTAL_EXPOSURE");
     }
-    if (risk.openMarketCount > DEFAULT_RISK_POLICY.maxOpenMarkets) {
+    if (!reconciliationOnly && risk.openMarketCount > DEFAULT_RISK_POLICY.maxOpenMarkets) {
       throw new Error("TOO_MANY_MARKETS");
     }
+    for (const execution of initialExecutions.filter(
+      (candidate) => candidate.status.toUpperCase() === "SUBMISSION_UNKNOWN"
+    )) {
+      const proposal = this.options.database.getProposal(execution.proposalId);
+      if (proposal === null) {
+        throw new Error("UNKNOWN_EXECUTION_PROPOSAL_MISSING");
+      }
+      const matchingOrders = openOrders.filter(
+        (order) =>
+          readStringValue(order.metadata)?.toLowerCase() ===
+          `0x${proposal.hash}`.toLowerCase()
+      );
+      if (matchingOrders.length > 1) {
+        throw new Error("MULTIPLE_ORDERS_MATCH_UNKNOWN_PROPOSAL");
+      }
+      const orderId = matchingOrders[0]?.id;
+      if (typeof orderId === "string") {
+        this.options.database.bindUncertainExecutionOrder(
+          proposal.id,
+          proposal.hash,
+          orderId,
+          this.now()
+        );
+      }
+    }
+    const executions = this.options.database.listExecutions();
     assertUserActivityBijection(
       this.options.database,
-      executions,
+      executions.filter(
+        (execution) => execution.status.toUpperCase() !== "SUBMISSION_UNKNOWN"
+      ),
       userActivity,
       activitySinceMs,
       this.now()
@@ -985,7 +1132,11 @@ export class TradingService {
     );
     for (const execution of monitored) {
       if (execution.clobOrderId === null) {
-        throw new Error("CLAIMED_EXECUTION_UNRESOLVED");
+        throw new Error(
+          execution.status.toUpperCase() === "SUBMISSION_UNKNOWN"
+            ? "SUBMISSION_UNKNOWN_REQUIRES_RECONCILIATION"
+            : "CLAIMED_EXECUTION_UNRESOLVED"
+        );
       }
       const proposal = this.options.database.getProposal(execution.proposalId);
       if (
@@ -1144,12 +1295,15 @@ export class TradingService {
       throw new Error("LIVE_EXECUTION_LEDGER_MISSING");
     }
     const response = parseExecutionResponse(execution.responseJson);
-    const localOrder = assertLocalOrderEvidence(
-      proposal,
-      orderId,
-      response,
-      orderState.expiration
-    );
+    const localOrder =
+      response.submissionUnknown === true
+        ? null
+        : assertLocalOrderEvidence(
+            proposal,
+            orderId,
+            response,
+            orderState.expiration
+          );
     const tradeIds = [
       ...readRemoteStringArray(response.tradeIDs),
       ...readRemoteStringArray(remote.associateTrades)
@@ -1230,7 +1384,7 @@ export class TradingService {
             orderId,
             makerAddress: binding.funderAddress,
             sizeMatchedMicros: sizeMatched,
-            expirationEpochSeconds: localOrder.expiration,
+            expirationEpochSeconds: localOrder?.expiration ?? orderState.expiration,
             transactions: attributedTrades.map((trade) => ({
               transactionHash: trade.transactionHash!,
               role: trade.role,
@@ -1320,9 +1474,100 @@ export class TradingService {
       }),
       this.now()
     );
+    if (
+      status === "CONFIRMED" &&
+      proposal.intent === "ENTRY" &&
+      onchain !== null &&
+      onchain.finalized
+    ) {
+      this.saveVerifiedEntryPosition(
+        proposal,
+        portfolio,
+        onchain,
+        attributedTrades,
+        this.now()
+      );
+    }
   }
 
-  private async assertLiveGates(): Promise<void> {
+  private saveVerifiedEntryPosition(
+    proposal: OrderProposal,
+    portfolio: PortfolioSnapshot,
+    onchain: NonNullable<Awaited<ReturnType<OnchainSettlementPort["verifySettlement"]>>>,
+    attributedTrades: AttributedTrade[],
+    nowMs: number
+  ): void {
+    const portfolioPosition = portfolio.positions.find(
+      (candidate) =>
+        candidate.tokenId === proposal.market.tokenId &&
+        candidate.conditionId === proposal.market.conditionId &&
+        candidate.sizeMicros > 0n
+    );
+    if (portfolioPosition === undefined) {
+      throw new Error("CONFIRMED_ENTRY_PORTFOLIO_POSITION_MISSING");
+    }
+    const existing = this.options.database.getPositionRecord(proposal.market.tokenId);
+    const transactionHashes = uniqueHashes([
+      ...entryTransactionHashes(existing),
+      ...onchain.transactionHashes,
+      ...attributedTrades
+        .map((trade) => trade.transactionHash)
+        .filter((hash): hash is string => hash !== null)
+    ]);
+    const fillTimes = [
+      ...attributedTrades.map((trade) => trade.matchTimeMs),
+      ...onchain.blockTimestampsMs
+    ].filter((value) => Number.isSafeInteger(value) && value > 0);
+    const observedOpenedAtMs = fillTimes.length > 0 ? Math.min(...fillTimes) : null;
+    const openedAtMs =
+      existing?.openedAtMs === null || existing?.openedAtMs === undefined
+        ? observedOpenedAtMs
+        : observedOpenedAtMs === null
+          ? existing.openedAtMs
+          : Math.min(existing.openedAtMs, observedOpenedAtMs);
+    const exitState =
+      existing?.exitState === "CLOSING" || existing?.exitState === "CLOSED"
+        ? existing.exitState
+        : "HOLDING";
+    const positionRecord: PositionRecord = {
+      tokenId: portfolioPosition.tokenId,
+      conditionId: portfolioPosition.conditionId,
+      question: portfolioPosition.question,
+      outcome: portfolioPosition.outcome,
+      side: proposal.side,
+      sharesMicros: portfolioPosition.sizeMicros,
+      averagePriceMicros: portfolioPosition.averagePriceMicros,
+      evidenceQuality: "VERIFIED",
+      entryFeesMicros:
+        (existing?.entryFeesMicros ?? 0n) + onchain.feeMicros,
+      entryTransactionHashesJson: JSON.stringify(transactionHashes),
+      entryProbabilityMicros: proposal.estimatedProbabilityMicros,
+      entryEdgeMicros: proposal.expectedEdgeMicros,
+      openedAtMs,
+      lastEvaluatedAtMs: nowMs,
+      lastMarketPriceMicros: portfolioPosition.currentPriceMicros,
+      lastEstimatedProbabilityMicros: proposal.estimatedProbabilityMicros,
+      lastResearchBundleId: proposal.researchBundleId ?? null,
+      sourcesJson: stringifyWithBigInts(proposal.sources),
+      researchRequiredSinceMs: existing?.researchRequiredSinceMs ?? null,
+      researchRequiredAtPriceMicros: existing?.researchRequiredAtPriceMicros ?? null,
+      minimumResearchCreatedAtMs: existing?.minimumResearchCreatedAtMs ?? null,
+      exitState,
+      activeExitProposalId: existing?.activeExitProposalId ?? null,
+      activeExitOrderId: existing?.activeExitOrderId ?? null
+    };
+    this.options.database.savePositionRecord(positionRecord, nowMs);
+    this.options.database.appendAudit("POSITION_ENTRY_VERIFIED", proposal.id, {
+      tokenId: positionRecord.tokenId,
+      conditionId: positionRecord.conditionId,
+      openedAtMs,
+      filledSharesMicros: onchain.filledSharesMicros,
+      feeMicros: onchain.feeMicros,
+      transactionHashes
+    });
+  }
+
+  private async assertLiveGates(intent: OrderIntent["intent"]): Promise<void> {
     if (!this.options.database.verifyAuditChain()) {
       throw new Error("AUDIT_CHAIN_INVALID");
     }
@@ -1352,7 +1597,7 @@ export class TradingService {
       this.options.accountBinding.signatureType(),
       this.options.marketData.checkGeoblock()
     ]);
-    if (!paperGate.passed) {
+    if (intent === "ENTRY" && !paperGate.passed) {
       throw new Error("PAPER_GATE_NOT_PASSED");
     }
     if (!this.options.liveTrading || !liveConfigured) {
@@ -1501,6 +1746,35 @@ function isResearchBundleUsable(
     bundle.tokenId !== tokenId ||
     bundle.expiresAtMs <= nowMs ||
     bundle.estimatedProbabilityMicros !== estimatedProbabilityMicros
+  ) {
+    return false;
+  }
+  const maxAgeMs =
+    bundle.eventVolatilityClass === "FAST"
+      ? CRISIS_SOURCE_AGE_MS
+      : MAX_SOURCE_AGE_MS;
+  if (
+    bundle.sources.length < 2 ||
+    bundle.sources.some((source) => {
+      let parsed: URL;
+      try {
+        parsed = new URL(source.finalUrl);
+      } catch {
+        return true;
+      }
+      return (
+        !isRecognizedEvidenceDomain(parsed.hostname) ||
+        extractRegistrableDomain(parsed.hostname) !== source.registrableDomain ||
+        source.publishedAtMs > nowMs + 60_000 ||
+        source.retrievedAtMs > nowMs + 60_000 ||
+        source.publishedAtMs > source.retrievedAtMs ||
+        nowMs - source.publishedAtMs > maxAgeMs ||
+        !/^https:\/\//u.test(source.finalUrl) ||
+        !/^https:\/\//u.test(source.requestedUrl) ||
+        !/^[a-f0-9]{64}$/u.test(source.excerptHash) ||
+        !/^[a-f0-9]{64}$/u.test(source.responseBodyHash)
+      );
+    })
   ) {
     return false;
   }
@@ -2260,6 +2534,55 @@ function existingPositionReport(
     transactionHashes: [],
     message: "Position already has a local record; no import was performed."
   };
+}
+
+function higherEvidenceQuality(
+  existing: PositionRecord["evidenceQuality"] | undefined,
+  incoming: PositionRecord["evidenceQuality"]
+): PositionRecord["evidenceQuality"] {
+  const rank = {
+    LEGACY_UNVERIFIED: 0,
+    PARTIALLY_VERIFIED: 1,
+    VERIFIED: 2
+  } as const;
+  return existing !== undefined && rank[existing] > rank[incoming]
+    ? existing
+    : incoming;
+}
+
+function automaticExitPolicyForQuality(
+  quality: LegacyImportReport["quality"]
+): LegacyImportReport["automaticExitPolicy"] {
+  return quality === "VERIFIED"
+    ? "FULL"
+    : quality === "PARTIALLY_VERIFIED"
+      ? "PRICE_ONLY"
+      : "BLOCKED";
+}
+
+function entryTransactionHashes(position: PositionRecord | null): string[] {
+  if (position === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(position.entryTransactionHashesJson);
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (value): value is string =>
+            typeof value === "string" && /^0x[a-fA-F0-9]{64}$/u.test(value)
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function uniqueHashes(values: string[]): string[] {
+  return [
+    ...new Set(
+      values
+        .filter((value) => /^0x[a-fA-F0-9]{64}$/u.test(value))
+        .map((value) => value.toLowerCase())
+    )
+  ];
 }
 
 function readRequiredRemoteString(

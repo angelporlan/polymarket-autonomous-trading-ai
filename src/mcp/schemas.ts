@@ -366,6 +366,25 @@ const httpsUrlSchema = z.string().url().refine(
   "Research sources must use HTTPS."
 );
 
+const researchProbabilityImpactSchema = signedDecimalSchema.refine(
+  (value) => Math.abs(Number(value)) <= 1,
+  "Probability impact must be between -1 and 1."
+);
+
+const researchSourceEvidenceSchema = z
+  .object({
+    requestedUrl: httpsUrlSchema,
+    supportedClaims: z.array(z.string().trim().min(3).max(500)).max(20),
+    contradictedClaims: z.array(z.string().trim().min(3).max(500)).max(20),
+    quotedFacts: z.array(z.string().trim().min(3).max(500)).min(1).max(10),
+    probabilityImpact: researchProbabilityImpactSchema
+  })
+  .strict()
+  .refine(
+    (value) => value.supportedClaims.length + value.contradictedClaims.length > 0,
+    "Each source must state at least one supported or contradicted claim."
+  );
+
 export const prepareResearchBundleInputSchema = z
   .object({
     conditionId: identifierSchema,
@@ -373,6 +392,7 @@ export const prepareResearchBundleInputSchema = z
     estimatedProbability: probabilityDecimalSchema,
     eventVolatilityClass: z.enum(["SLOW", "FAST"]),
     sourceUrls: z.array(httpsUrlSchema).min(2).max(5),
+    sourceEvidence: z.array(researchSourceEvidenceSchema).min(2).max(5),
     rationale: z.string().trim().min(20).max(5_000),
     counterRationale: z.string().trim().min(20).max(5_000)
   })
@@ -390,7 +410,11 @@ export const verifiedSourceSchema = z
     httpStatus: z.number().int().min(200).max(299),
     contentType: z.enum(["text/html", "text/plain", "application/xhtml+xml"]),
     excerptHash: proposalHashSchema,
-    responseBodyHash: proposalHashSchema
+    responseBodyHash: proposalHashSchema,
+    supportedClaims: z.array(z.string().trim().min(3).max(500)).max(20),
+    contradictedClaims: z.array(z.string().trim().min(3).max(500)).max(20),
+    quotedFactHashes: z.array(proposalHashSchema).min(1).max(10),
+    probabilityImpact: signedDecimalSchema
   })
   .strict();
 
@@ -556,7 +580,6 @@ export const prepareTradingSessionOutputSchema = z
     hardCeilingRemainingPusd: nonNegativeDecimalSchema,
     dailyStopRemainingPusd: nonNegativeDecimalSchema,
     maximumAuthorizablePusd: positiveDecimalSchema,
-    challenge: z.string().regex(/^[A-Z0-9]{16,64}$/u),
     expiresAt: timestampSchema
   })
   .strict();

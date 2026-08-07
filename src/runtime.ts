@@ -442,7 +442,6 @@ export class PolymarketRuntime {
       maximumAuthorizablePusd: formatMicros(
         prepared.pending.maximumAuthorizableMicros
       ),
-      challenge: prepared.challenge,
       expiresAt: new Date(prepared.pending.expiresAtMs).toISOString()
     };
   }
@@ -459,6 +458,15 @@ export class PolymarketRuntime {
       ),
       eventVolatilityClass: input.eventVolatilityClass,
       requestedUrls: input.sourceUrls,
+      sourceEvidence: input.sourceEvidence.map((evidence) => ({
+        requestedUrl: evidence.requestedUrl,
+        supportedClaims: evidence.supportedClaims,
+        contradictedClaims: evidence.contradictedClaims,
+        quotedFacts: evidence.quotedFacts,
+        probabilityImpactMicros: parseDecimalToMicros(
+          evidence.probabilityImpact.replace(/^-/, "")
+        ) * (evidence.probabilityImpact.startsWith("-") ? -1n : 1n)
+      })),
       rationale: input.rationale,
       counterRationale: input.counterRationale
     });
@@ -899,6 +907,7 @@ export class PolymarketRuntime {
       .some(
         (execution) =>
           execution.status.toUpperCase() === "CLAIMED" ||
+          execution.status.toUpperCase() === "SUBMISSION_UNKNOWN" ||
           (execution.clobOrderId !== null &&
             !TERMINAL_REMOTE_STATUSES.has(execution.status.toUpperCase()))
       );
@@ -1152,7 +1161,11 @@ function researchBundleOutput(
         | "text/plain"
         | "application/xhtml+xml",
       excerptHash: source.excerptHash,
-      responseBodyHash: source.responseBodyHash
+      responseBodyHash: source.responseBodyHash,
+      supportedClaims: source.supportedClaims,
+      contradictedClaims: source.contradictedClaims,
+      quotedFactHashes: source.quotedFactHashes,
+      probabilityImpact: formatMicros(source.probabilityImpactMicros)
     })),
     rationale: bundle.rationale,
     counterRationale: bundle.counterRationale,

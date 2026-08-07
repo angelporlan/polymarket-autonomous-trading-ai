@@ -14,8 +14,8 @@ import type {
 } from "../domain/types.js";
 import {
   createTradingSession,
-  hashSessionChallenge,
   type PendingTradingSession,
+  type SessionAuthorizationAttestation,
   type SessionAuthorization,
   type TradingSession
 } from "../domain/session.js";
@@ -310,6 +310,16 @@ export class TradingDatabase {
   markExecutionFailed(proposalId: string, proposalHash: string): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const current = this.db
+        .prepare(
+          `SELECT status FROM executions
+           WHERE proposal_id = ? AND proposal_hash = ?`
+        )
+        .get(proposalId, proposalHash) as { status: string } | undefined;
+      if (current !== undefined && current.status !== "CLAIMED") {
+        this.db.exec("COMMIT");
+        return;
+      }
       this.db
         .prepare(
           `DELETE FROM executions WHERE proposal_id = ? AND proposal_hash = ? AND status = 'CLAIMED'`
@@ -328,6 +338,84 @@ export class TradingDatabase {
       this.db
         .prepare("DELETE FROM exit_reservations WHERE proposal_id = ?")
         .run(proposalId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  markExecutionSubmissionUnknown(
+    proposalId: string,
+    proposalHash: string,
+    responseJson: string,
+    nowMs = Date.now()
+  ): void {
+    if (responseJson.length > 1_000_000) {
+      throw new Error("Execution uncertainty response is too large.");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db
+        .prepare(
+          `UPDATE executions
+           SET status = 'SUBMISSION_UNKNOWN', response_json = ?, submitted_at_ms = ?
+           WHERE proposal_id = ? AND proposal_hash = ?
+             AND clob_order_id IS NULL AND status = 'CLAIMED'`
+        )
+        .run(responseJson, nowMs, proposalId, proposalHash);
+      if (result.changes !== 1) {
+        throw new Error("Execution uncertainty state changed unexpectedly.");
+      }
+      this.appendAudit("EXECUTION_SUBMISSION_UNKNOWN", proposalId, {
+        proposalHash,
+        responseHash: createHash("sha256").update(responseJson).digest("hex"),
+        recordedAtMs: nowMs
+      });
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  bindUncertainExecutionOrder(
+    proposalId: string,
+    proposalHash: string,
+    clobOrderId: string,
+    nowMs = Date.now()
+  ): void {
+    if (!/^0x[a-fA-F0-9]{64}$/u.test(clobOrderId)) {
+      throw new Error("Invalid CLOB order id for uncertain execution.");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const execution = this.db
+        .prepare(
+          `UPDATE executions
+           SET clob_order_id = ?
+           WHERE proposal_id = ? AND proposal_hash = ?
+             AND clob_order_id IS NULL AND status = 'SUBMISSION_UNKNOWN'`
+        )
+        .run(clobOrderId, proposalId, proposalHash);
+      const proposal = this.db
+        .prepare(
+          `UPDATE proposals
+           SET status = 'SUBMITTED',
+               payload_json = json_set(payload_json, '$.status', 'SUBMITTED'),
+               revision = revision + 1,
+               updated_at_ms = ?
+           WHERE id = ? AND hash = ? AND status = 'EXECUTING'`
+        )
+        .run(nowMs, proposalId, proposalHash);
+      if (execution.changes !== 1 || proposal.changes !== 1) {
+        throw new Error("Uncertain execution order binding changed unexpectedly.");
+      }
+      this.appendAudit("EXECUTION_UNKNOWN_ORDER_BOUND", proposalId, {
+        proposalHash,
+        clobOrderId,
+        boundAtMs: nowMs
+      });
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -1097,7 +1185,8 @@ export class TradingDatabase {
   getSessionAuthorization(pendingSessionId: string): SessionAuthorization | null {
     const row = this.db
       .prepare(
-        `SELECT pending_session_id, amount_micros, challenge_hash,
+      `SELECT pending_session_id, amount_micros, challenge_hash,
+                attestation_nonce, attestation_source,
                 confirmed_at_ms, consumed_at_ms
          FROM session_authorizations WHERE pending_session_id = ?`
       )
@@ -1106,6 +1195,8 @@ export class TradingDatabase {
           pending_session_id: string;
           amount_micros: string;
           challenge_hash: string;
+          attestation_nonce: string;
+          attestation_source: string;
           confirmed_at_ms: number;
           consumed_at_ms: number | null;
         }
@@ -1115,21 +1206,34 @@ export class TradingDatabase {
       pendingSessionId: row.pending_session_id,
       amountMicros: BigInt(row.amount_micros),
       challengeHash: row.challenge_hash,
+      attestationNonce: row.attestation_nonce,
+      attestationSource: row.attestation_source as "macos-native-user-presence",
       confirmedAtMs: row.confirmed_at_ms,
       consumedAtMs: row.consumed_at_ms
     };
   }
 
   recordSessionAuthorization(
-    pendingSessionId: string,
-    amountMicros: bigint,
-    challenge: string,
+    attestation: SessionAuthorizationAttestation,
     nowMs = Date.now()
   ): void {
+    const {
+      pendingSessionId,
+      amountMicros,
+      attestationNonce,
+      attestationSource,
+      confirmedAtMs
+    } = attestation;
     if (amountMicros <= 0n) {
       throw new Error("Authorized trading session budget must be positive.");
     }
-    const challengeHash = hashSessionChallenge(challenge);
+    if (
+      attestationSource !== "macos-native-user-presence" ||
+      !/^[a-f0-9]{64}$/u.test(attestationNonce) ||
+      !Number.isSafeInteger(confirmedAtMs)
+    ) {
+      throw new Error("Invalid native trading session attestation.");
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const pendingRow = this.db
@@ -1143,10 +1247,14 @@ export class TradingDatabase {
       }
       const pending = parseWithBigInts<PendingTradingSession>(pendingRow.payload_json);
       if (nowMs >= pending.expiresAtMs) {
-        throw new Error("Pending trading session challenge has expired.");
+        throw new Error("Pending trading session authorization has expired.");
       }
-      if (pending.challengeHash !== challengeHash) {
-        throw new Error("Trading session challenge mismatch.");
+      if (
+        confirmedAtMs < pending.createdAtMs ||
+        confirmedAtMs > pending.expiresAtMs ||
+        confirmedAtMs > nowMs
+      ) {
+        throw new Error("Native trading session attestation timestamp is invalid.");
       }
       if (amountMicros > pending.maximumAuthorizableMicros) {
         throw new Error(
@@ -1175,14 +1283,17 @@ export class TradingDatabase {
       this.db
         .prepare(
           `INSERT INTO session_authorizations
-            (pending_session_id, amount_micros, challenge_hash, confirmed_at_ms, consumed_at_ms)
-           VALUES (?, ?, ?, ?, NULL)`
+            (pending_session_id, amount_micros, challenge_hash,
+             attestation_nonce, attestation_source, confirmed_at_ms, consumed_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, NULL)`
         )
         .run(
           pendingSessionId,
           amountMicros.toString(),
-          challengeHash,
-          nowMs
+          pending.challengeHash,
+          attestationNonce,
+          attestationSource,
+          confirmedAtMs
         );
       const updated: PendingTradingSession = {
         ...pending,
@@ -1196,8 +1307,9 @@ export class TradingDatabase {
         .run(updated.status, stringifyWithBigInts(updated), pendingSessionId);
       this.appendAudit("TRADING_SESSION_AUTHORIZED", pendingSessionId, {
         amountMicros,
-        challengeHash,
-        confirmedAtMs: nowMs
+        attestationSource,
+        attestationNonce,
+        confirmedAtMs
       });
       this.db.exec("COMMIT");
     } catch (error) {
@@ -1367,6 +1479,13 @@ export class TradingDatabase {
       tokenId: bundle.tokenId,
       contentHash: bundle.contentHash,
       sourceDomains: bundle.sources.map((source) => source.registrableDomain),
+      sourceEvidence: bundle.sources.map((source) => ({
+        requestedUrl: source.requestedUrl,
+        supportedClaims: source.supportedClaims,
+        contradictedClaims: source.contradictedClaims,
+        quotedFactHashes: source.quotedFactHashes,
+        probabilityImpactMicros: source.probabilityImpactMicros
+      })),
       expiresAtMs: bundle.expiresAtMs
     });
   }
@@ -1703,8 +1822,12 @@ export class TradingDatabase {
   private expireInterruptedExecutions(nowMs: number): void {
     const interrupted = this.db
       .prepare(
-        `SELECT id FROM proposals
-         WHERE status = 'EXECUTING'`
+        `SELECT p.id FROM proposals p
+         WHERE p.status = 'EXECUTING'
+           AND NOT EXISTS (
+             SELECT 1 FROM executions e
+             WHERE e.proposal_id = p.id AND e.status = 'SUBMISSION_UNKNOWN'
+           )`
       )
       .all() as Array<{ id: string }>;
     this.db
@@ -1714,7 +1837,11 @@ export class TradingDatabase {
              payload_json = json_set(payload_json, '$.status', 'EXPIRED'),
              revision = revision + 1,
              updated_at_ms = ?
-         WHERE status = 'EXECUTING'`
+         WHERE status = 'EXECUTING'
+           AND NOT EXISTS (
+             SELECT 1 FROM executions e
+             WHERE e.proposal_id = proposals.id AND e.status = 'SUBMISSION_UNKNOWN'
+           )`
       )
       .run(nowMs);
     for (const row of interrupted) {
@@ -1825,6 +1952,8 @@ export class TradingDatabase {
         pending_session_id TEXT PRIMARY KEY REFERENCES pending_trading_sessions(id),
         amount_micros TEXT NOT NULL,
         challenge_hash TEXT NOT NULL,
+        attestation_nonce TEXT NOT NULL DEFAULT '',
+        attestation_source TEXT NOT NULL DEFAULT 'legacy-challenge',
         confirmed_at_ms INTEGER NOT NULL,
         consumed_at_ms INTEGER
       );
@@ -1879,6 +2008,32 @@ export class TradingDatabase {
         ON executions(clob_order_id)
         WHERE clob_order_id IS NOT NULL;
     `);
+    ensureColumn(
+      this.db,
+      "session_authorizations",
+      "attestation_nonce",
+      "TEXT NOT NULL DEFAULT ''"
+    );
+    ensureColumn(
+      this.db,
+      "session_authorizations",
+      "attestation_source",
+      "TEXT NOT NULL DEFAULT 'legacy-challenge'"
+    );
+  }
+}
+
+function ensureColumn(
+  database: DatabaseSync,
+  table: string,
+  column: string,
+  definition: string
+): void {
+  const columns = database
+    .prepare(`PRAGMA table_info(${table})`)
+    .all() as Array<{ name: string }>;
+  if (!columns.some((candidate) => candidate.name === column)) {
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 
@@ -1892,6 +2047,8 @@ function normalizePositionRecord(value: Record<string, unknown>): PositionRecord
   return {
     ...(record as PositionRecord),
     evidenceQuality: record.evidenceQuality ?? "LEGACY_UNVERIFIED",
+    entryFeesMicros: record.entryFeesMicros ?? null,
+    entryTransactionHashesJson: record.entryTransactionHashesJson ?? "[]",
     entryProbabilityMicros: record.entryProbabilityMicros ?? null,
     openedAtMs: record.openedAtMs ?? null,
     entryEdgeMicros: record.entryEdgeMicros ?? null,
@@ -1902,6 +2059,9 @@ function normalizePositionRecord(value: Record<string, unknown>): PositionRecord
         : 0n),
     lastEstimatedProbabilityMicros: record.lastEstimatedProbabilityMicros ?? null,
     lastResearchBundleId: record.lastResearchBundleId ?? null,
+    researchRequiredSinceMs: record.researchRequiredSinceMs ?? null,
+    researchRequiredAtPriceMicros: record.researchRequiredAtPriceMicros ?? null,
+    minimumResearchCreatedAtMs: record.minimumResearchCreatedAtMs ?? null,
     activeExitProposalId: record.activeExitProposalId ?? null,
     activeExitOrderId: record.activeExitOrderId ?? null
   };
@@ -2024,6 +2184,7 @@ function isAllowedExecutionTransition(
   ]);
   const known = new Set([
     "SUBMITTED_UNRECONCILED",
+    "SUBMISSION_UNKNOWN",
     "LIVE",
     "PARTIALLY_FILLED",
     "CANCEL_REQUESTED",

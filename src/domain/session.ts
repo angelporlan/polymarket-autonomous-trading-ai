@@ -49,8 +49,18 @@ export interface SessionAuthorization {
   pendingSessionId: string;
   amountMicros: bigint;
   challengeHash: string;
+  attestationNonce: string;
+  attestationSource: "macos-native-user-presence";
   confirmedAtMs: number;
   consumedAtMs: number | null;
+}
+
+export interface SessionAuthorizationAttestation {
+  pendingSessionId: string;
+  amountMicros: bigint;
+  attestationNonce: string;
+  attestationSource: "macos-native-user-presence";
+  confirmedAtMs: number;
 }
 
 export interface CreateSessionInput {

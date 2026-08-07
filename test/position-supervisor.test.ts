@@ -15,6 +15,8 @@ describe("PositionSupervisor", () => {
     sharesMicros: 100n * PUSD_SCALE,
     averagePriceMicros: 500_000n, // $0.50 entry
     evidenceQuality: "VERIFIED",
+    entryFeesMicros: 0n,
+    entryTransactionHashesJson: "[]",
     entryProbabilityMicros: 550_000n,
     entryEdgeMicros: 50_000n,
     openedAtMs: nowMs - 2 * 86400 * 1000, // 2 days ago
@@ -23,6 +25,9 @@ describe("PositionSupervisor", () => {
     lastEstimatedProbabilityMicros: 600_000n,
     lastResearchBundleId: "bundle-current",
     sourcesJson: "[]",
+    researchRequiredSinceMs: null,
+    researchRequiredAtPriceMicros: null,
+    minimumResearchCreatedAtMs: null,
     exitState: "HOLDING",
     activeExitProposalId: null,
     activeExitOrderId: null
@@ -161,6 +166,36 @@ describe("PositionSupervisor", () => {
 
     expect(action.shouldExit).toBe(false);
     expect(action.triggerReason).toBe("RESEARCH_REQUIRED");
+  });
+
+  it("keeps research required until a bundle created after the shock exists", () => {
+    const pendingResearch = {
+      ...basePosition,
+      researchRequiredSinceMs: nowMs,
+      researchRequiredAtPriceMicros: 600_000n,
+      minimumResearchCreatedAtMs: nowMs,
+      lastMarketPriceMicros: 500_000n
+    };
+    const withoutBundle = evaluatePositionExitPolicy(
+      pendingResearch,
+      600_000n,
+      650_000n,
+      "bundle-old",
+      futureEndMs,
+      nowMs + 1_000
+    );
+    expect(withoutBundle.triggerReason).toBe("RESEARCH_REQUIRED");
+
+    const withNewBundle = evaluatePositionExitPolicy(
+      pendingResearch,
+      600_000n,
+      650_000n,
+      "bundle-new",
+      futureEndMs,
+      nowMs + 2_000,
+      nowMs + 1
+    );
+    expect(withNewBundle.triggerReason).toBe("HOLDING");
   });
 
   it("triggers HOLD_UNTIL_RESOLUTION when market ends in under 24 hours", () => {

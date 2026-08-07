@@ -34,6 +34,22 @@ const input = {
     "https://www.reuters.com/world/example-verified",
     "https://www.apnews.com/article/example-verified"
   ],
+  sourceEvidence: [
+    {
+      requestedUrl: "https://www.reuters.com/world/example-verified",
+      supportedClaims: ["The Reuters report supports the current estimate."],
+      contradictedClaims: ["The report notes a possible adverse resolution."],
+      quotedFacts: ["supporting details"],
+      probabilityImpactMicros: 10_000n
+    },
+    {
+      requestedUrl: "https://www.apnews.com/article/example-verified",
+      supportedClaims: ["The AP report supports the current estimate."],
+      contradictedClaims: ["The report notes a possible adverse resolution."],
+      quotedFacts: ["supporting details"],
+      probabilityImpactMicros: -5_000n
+    }
+  ],
   rationale: "Two independently retrieved sources support the current estimate.",
   counterRationale: "The official event could still resolve against the estimate."
 };
@@ -62,7 +78,7 @@ describe("ResearchVerifier", () => {
     expect(result.sources[0]?.excerptHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(result).not.toHaveProperty("body");
     expect(result.contentHash).toMatch(/^[a-f0-9]{64}$/u);
-    expect(result.expiresAtMs).toBe(NOW_MS + 7 * 24 * 60 * 60 * 1_000);
+    expect(result.expiresAtMs).toBe(NOW_MS - 60 * 60 * 1_000 + 7 * 24 * 60 * 60 * 1_000);
     const database = new TradingDatabase(":memory:");
     database.saveResearchBundle(result);
     expect(database.getResearchBundle(result.id)).toEqual(result);

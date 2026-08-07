@@ -89,6 +89,26 @@ describe("risk evaluation", () => {
     );
   });
 
+  it("keeps reduce-only EXIT available during entry risk stops", () => {
+    const now = Date.now();
+    const intent = intentFixture(now);
+    intent.intent = "EXIT";
+    intent.side = "SELL";
+    intent.exitReason = "STOP_LOSS_TRIGGERED";
+    intent.limitPriceMicros = 390_000n;
+    intent.market.spreadMicros = 40_000n;
+    const result = evaluateOrderRisk(intent, {
+      ...riskContextFixture(now),
+      heldSharesMicros: intent.sharesMicros,
+      dailyPnlMicros: -10n * PUSD_SCALE,
+      dailyPnlKnown: false,
+      coolingDownUntilMs: now + 86_400_000
+    });
+    expect(result.violations.map((violation) => violation.code)).not.toEqual(
+      expect.arrayContaining(["DAILY_STOP", "DAILY_PNL_UNAVAILABLE", "COOLING_DOWN", "SPREAD_TOO_WIDE"])
+    );
+  });
+
   it("reserves the maximum fee over the executable price interval", () => {
     const shares = 100n * PUSD_SCALE;
     expect(

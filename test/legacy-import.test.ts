@@ -184,6 +184,35 @@ describe("legacy position import", () => {
       now: () => NOW_MS
     });
 
+    database.savePositionRecord(
+      {
+        tokenId: TOKEN,
+        conditionId: CONDITION,
+        question: position.question,
+        outcome: position.outcome,
+        side: "BUY",
+        sharesMicros: position.sizeMicros,
+        averagePriceMicros: position.averagePriceMicros,
+        evidenceQuality: "LEGACY_UNVERIFIED",
+        entryFeesMicros: null,
+        entryTransactionHashesJson: "[]",
+        entryProbabilityMicros: null,
+        entryEdgeMicros: null,
+        openedAtMs: null,
+        lastEvaluatedAtMs: NOW_MS,
+        lastMarketPriceMicros: position.currentPriceMicros,
+        lastEstimatedProbabilityMicros: null,
+        lastResearchBundleId: null,
+        sourcesJson: "[]",
+        researchRequiredSinceMs: null,
+        researchRequiredAtPriceMicros: null,
+        minimumResearchCreatedAtMs: null,
+        exitState: "LEGACY_UNVERIFIED",
+        activeExitProposalId: null,
+        activeExitOrderId: null
+      },
+      NOW_MS
+    );
     const first = await service.importLegacyPosition(TOKEN);
     const second = await service.importLegacyPosition(TOKEN);
     expect(first.imported).toBe(true);

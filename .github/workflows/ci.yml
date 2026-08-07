@@ -31,3 +31,16 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Secret scan
+        run: |
+          if git grep -n -I -E 'BEGIN (RSA|EC|OPENSSH|PRIVATE) KEY|0x[0-9a-fA-F]{64}' -- . ':(exclude)test/**' ':(exclude)RUNBOOK_PILOTO.md'; then
+            echo "Potential secret material found in tracked non-fixture files."
+            exit 1
+          fi
+
+      - name: Integration regression tests
+        run: npm test -- --run test/storage.test.ts test/live-adapter.test.ts test/exit-reservation.test.ts test/session.test.ts

@@ -292,14 +292,14 @@ export function evaluateOrderRisk(
     });
   }
 
-  if (context.dailyPnlMicros <= -policy.dailyStopMicros) {
+  if (!isExit && context.dailyPnlMicros <= -policy.dailyStopMicros) {
     violations.push({
       code: "DAILY_STOP",
       message: "The 10 pUSD daily stop has been reached."
     });
   }
 
-  if (intent.executionMode === "live" && context.dailyPnlKnown === false) {
+  if (!isExit && intent.executionMode === "live" && context.dailyPnlKnown === false) {
     violations.push({
       code: "DAILY_PNL_UNAVAILABLE",
       message: "The local daily risk session has not been armed."
@@ -307,6 +307,7 @@ export function evaluateOrderRisk(
   }
 
   if (
+    !isExit &&
     context.coolingDownUntilMs !== undefined &&
     context.coolingDownUntilMs !== null &&
     context.coolingDownUntilMs > context.nowMs
@@ -331,7 +332,7 @@ export function evaluateOrderRisk(
     });
   }
 
-  if (market.spreadMicros > policy.maxSpreadMicros) {
+  if (!isExit && market.spreadMicros > policy.maxSpreadMicros) {
     violations.push({
       code: "SPREAD_TOO_WIDE",
       message: "Spread is wider than 0.03 pUSD."
