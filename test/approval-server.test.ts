@@ -52,14 +52,44 @@ describe("DashboardHttpServer (Read-Only Monitoring)", () => {
     expect(json.pnl).toMatchObject({
       paper: {
         realizedPusd: "0",
+        unrealizedPusd: "0",
         feesPusd: "0",
         netPusd: "0",
+        checkpointAt: null,
         openTrades: 0
       },
       live: { known: false, source: "remote_reconciliation" }
     });
     expect(json.locks).toBeDefined();
     expect(json.lastReconciliation).toBeNull();
+  });
+
+  it("reports PnL only from the latest audited paper checkpoint", async () => {
+    const harness = await createHarness();
+    harness.database.appendAudit("PAPER_RECONCILIATION_CHECKPOINT", null, {
+      recordedAtMs: 1_800_000_000_000,
+      realizedPnlMicros: 1_250_000n,
+      unrealizedPnlMicros: -250_000n,
+      netPnlMicros: 1_000_000n,
+      totalFeesMicros: 100_000n
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${harness.port}/api/status`,
+      { headers: { host: `127.0.0.1:${harness.port}` } }
+    );
+    const json = (await response.json()) as {
+      pnl: {
+        paper: Record<string, unknown>;
+      };
+    };
+    expect(json.pnl.paper).toMatchObject({
+      realizedPusd: "1.25",
+      unrealizedPusd: "-0.25",
+      feesPusd: "0.1",
+      netPusd: "1",
+      checkpointAt: "2027-01-15T08:00:00.000Z"
+    });
   });
 
   it("blocks POST requests as Method Not Allowed in read-only mode", async () => {

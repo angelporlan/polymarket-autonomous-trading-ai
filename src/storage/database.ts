@@ -964,6 +964,53 @@ export class TradingDatabase {
     return rows.map((row) => parseWithBigInts<PaperTrade>(row.payload_json));
   }
 
+  getLatestPaperReconciliationCheckpoint(): {
+    recordedAtMs: number;
+    realizedPnlMicros: bigint;
+    unrealizedPnlMicros: bigint;
+    netPnlMicros: bigint;
+    totalFeesMicros: bigint;
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT created_at_ms, payload_json FROM audit_events
+         WHERE event_type = 'PAPER_RECONCILIATION_CHECKPOINT'
+         ORDER BY id DESC LIMIT 1`
+      )
+      .get() as { created_at_ms: number; payload_json: string } | undefined;
+    if (!row) {
+      return null;
+    }
+    try {
+      const payload = parseWithBigInts<Record<string, unknown>>(row.payload_json);
+      const values = {
+        recordedAtMs: payload.recordedAtMs,
+        realizedPnlMicros: payload.realizedPnlMicros,
+        unrealizedPnlMicros: payload.unrealizedPnlMicros,
+        netPnlMicros: payload.netPnlMicros,
+        totalFeesMicros: payload.totalFeesMicros
+      };
+      if (
+        !Number.isSafeInteger(values.recordedAtMs) ||
+        typeof values.realizedPnlMicros !== "bigint" ||
+        typeof values.unrealizedPnlMicros !== "bigint" ||
+        typeof values.netPnlMicros !== "bigint" ||
+        typeof values.totalFeesMicros !== "bigint"
+      ) {
+        return null;
+      }
+      return values as {
+        recordedAtMs: number;
+        realizedPnlMicros: bigint;
+        unrealizedPnlMicros: bigint;
+        netPnlMicros: bigint;
+        totalFeesMicros: bigint;
+      };
+    } catch {
+      return null;
+    }
+  }
+
   getPaperTradeByProposal(proposalId: string): PaperTrade | null {
     const row = this.db
       .prepare(

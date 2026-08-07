@@ -802,7 +802,7 @@ superficie de autorización.
 - [x] El runtime/MCP ya no contiene `beginExecution`, `executeLocallyApproved`, `ApprovalUrlPort`, `LocalApproval`, `AWAITING_LOCAL`, `LOCALLY_APPROVED` ni el alias `ApprovalHttpServer`; las filas históricas de la tabla SQLite de aprobaciones, si existen en una base previa, no se borran ni se vuelven a leer.
 - [x] `execute_staged_order` reclama y ejecuta de forma autónoma mediante `claimAutonomousExecution`, ligado a `proposalId`, hash y sesión; no existe confirmación por orden en el dashboard.
 - [x] El dashboard arranca antes de conectar el transporte MCP, se limita a `127.0.0.1`, valida `Host`/`Origin`, acepta únicamente `GET` y expone estado, sesiones, posiciones, research bundles, órdenes, PnL paper, locks y última reconciliación sin respuestas autenticadas ni acciones financieras.
-- [x] Verificación: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `249` tests); `test/approval-server.test.ts` cubre el snapshot de telemetría y el bloqueo de `POST`.
+- [x] Verificación: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `251` tests); `test/approval-server.test.ts` cubre el snapshot de telemetría, PnL desde checkpoint y el bloqueo de `POST`.
 
 ---
 
@@ -869,7 +869,7 @@ superficie de autorización.
 - [x] `test/domain.test.ts`, `test/risk-hard-ceiling.test.ts`, `test/polymarket-client.test.ts` y `test/live-reconciliation.test.ts` cubren hash inmutable, límites, fees, GTD, sanitización, fills y reconciliación sin credenciales ni endpoints productivos.
 - [x] `test/exit-reservation.test.ts`, `test/position-supervisor.test.ts`, `test/paper-reconciler.test.ts` y `test/paper-simulation-runner.test.ts` cubren reservas de salida, stops, take-profit, duración, resolución, fills parciales, PnL y errores de reconciliación.
 - [x] `test/session-binding.test.ts` cubre la reclamación de una propuesta una sola vez; `test/storage.test.ts` añade la prueba explícita de reinicio durante `EXECUTING`, conservando el execution `CLAIMED`, expirando la propuesta e impidiendo un reenvío.
-- [x] Verificación local: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `250` tests).
+- [x] Verificación local: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `251` tests).
 - [x] `npm audit --audit-level=high` queda sin vulnerabilidades altas tras una actualización no forzada del lockfile. Permanecen dos moderadas del `@modelcontextprotocol/sdk@1.29.0` fijado y vulnerabilidades bajas transitivas, incluida `elliptic` sin fix disponible; no se ejecutó `npm audit fix --force`.
 - [x] Escaneo dirigido de secretos sobre código no generado, excluyendo fixtures sintéticos, no encontró claves privadas, frases semilla, credenciales L2, tokens Bearer ni claves API utilizables; `gitleaks` no está instalado en el entorno.
 - [ ] El soak paper de 14 días y el shadow live de 7 días aún requieren ejecución operativa sostenida; no se declaran completados por pruebas unitarias.

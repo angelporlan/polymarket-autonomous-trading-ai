@@ -115,18 +115,12 @@ export class DashboardHttpServer {
     const proposals = this.options.database.listProposals();
     const executions = this.options.database.listExecutions();
     const paperTrades = this.options.database.listPaperTrades();
+    const paperCheckpoint =
+      this.options.database.getLatestPaperReconciliationCheckpoint();
     const cooldown = this.options.database.getCooldown();
     const supervisor = this.options.database.getSupervisorHeartbeat();
     const openPositions = positions.filter(
       (position) => position.exitState !== "CLOSED" && position.sharesMicros > 0n
-    );
-    const realizedPaperPnlMicros = paperTrades.reduce(
-      (total, trade) => total + trade.realizedPnlMicros,
-      0n
-    );
-    const paperFeesMicros = paperTrades.reduce(
-      (total, trade) => total + trade.feesMicros,
-      0n
     );
     const executionByProposal = new Map(
       executions.map((execution) => [execution.proposalId, execution])
@@ -210,9 +204,11 @@ export class DashboardHttpServer {
       }),
       pnl: {
         paper: {
-          realizedPusd: formatMicros(realizedPaperPnlMicros),
-          feesPusd: formatMicros(paperFeesMicros),
-          netPusd: formatMicros(realizedPaperPnlMicros - paperFeesMicros),
+          realizedPusd: formatMicros(paperCheckpoint?.realizedPnlMicros ?? 0n),
+          unrealizedPusd: formatMicros(paperCheckpoint?.unrealizedPnlMicros ?? 0n),
+          feesPusd: formatMicros(paperCheckpoint?.totalFeesMicros ?? 0n),
+          netPusd: formatMicros(paperCheckpoint?.netPnlMicros ?? 0n),
+          checkpointAt: toIsoOrNull(paperCheckpoint?.recordedAtMs ?? null),
           openTrades: paperTrades.filter((trade) => trade.status === "OPEN").length
         },
         live: {
