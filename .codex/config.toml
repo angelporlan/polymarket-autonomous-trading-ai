@@ -7,15 +7,15 @@ cwd = "/Users/angel/devp/polymarket"
 startup_timeout_sec = 15
 tool_timeout_sec = 60
 
-# Only non-secret values belong here. Replace the zero address with the public
-# Polymarket profile address before using read or paper mode.
+# Only safe defaults belong here. Put local runtime values in an ignored
+# configuration or environment, and keep live disabled until all gates pass.
 [mcp_servers.polymarket.env]
-POLYMARKET_PROFILE_ADDRESS = "0xe6720944e451ad8a650278961d4c30817e91b0b7"
+POLYMARKET_PROFILE_ADDRESS = "0x0000000000000000000000000000000000000000"
 POLYMARKET_DB_PATH = "./data/polymarket.sqlite"
 POLYMARKET_APPROVAL_HOST = "127.0.0.1"
 POLYMARKET_APPROVAL_PORT = "8787"
-POLYMARKET_LIVE_ENABLED = "true"
-PAPER_GATE_SKIP = "true"
+POLYMARKET_LIVE_ENABLED = "false"
+PAPER_GATE_SKIP = "false"
 POLYGON_RPC_URLS = "https://polygon-rpc.com,https://polygon-bor-rpc.publicnode.com"
 POLYMARKET_KEYCHAIN_SERVICE = "codex-polymarket-guarded"
 # Live also requires POLYGON_RPC_URLS with two credential-free HTTPS origins.
