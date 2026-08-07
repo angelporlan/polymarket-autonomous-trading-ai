@@ -387,6 +387,22 @@ export class PolymarketRuntime {
     };
   }
 
+  startTradingSession(input: { executionMode: "paper" | "live"; authorizedBudgetPusd: string; ttlHours?: number }) {
+    this.requireProfile();
+    const authorizedBudgetMicros = parseDecimalToMicros(input.authorizedBudgetPusd);
+    const ttlMs = (input.ttlHours ?? 8) * 3600 * 1000;
+    return this.service.startTradingSession({
+      executionMode: input.executionMode,
+      authorizedBudgetMicros,
+      ttlMs
+    });
+  }
+
+  getActiveTradingSession(executionMode: "paper" | "live") {
+    this.requireProfile();
+    return this.service.getActiveTradingSession(executionMode);
+  }
+
   async getOrderStatus(
     input: GetOrderStatusInput
   ): Promise<GetOrderStatusOutput> {

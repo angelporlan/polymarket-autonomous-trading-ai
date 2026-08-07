@@ -224,7 +224,7 @@ export function evaluatePaperGate(
   }
   if (skipPaperGate) {
     return {
-      passed: true,
+      passed: !hardFailure,
       skipped: true,
       reasons: ["PAPER_GATE_SKIPPED", ...reasons]
     };

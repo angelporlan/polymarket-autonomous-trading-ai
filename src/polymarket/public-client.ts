@@ -1316,7 +1316,9 @@ function validateBookSnapshot(
     );
   }
 
-  return nowMs;
+  const rawTimestamp = book.timestamp ?? book.t;
+  const capturedAtMs = parseRemoteBookTimestampMs(rawTimestamp);
+  return validateBookEnvelope(capturedAtMs, nowMs);
 }
 
 function validateBookEnvelope(capturedAtMs: number | null, nowMs: number): number {

@@ -576,12 +576,20 @@ function validateApprovalOrigin(
       reason: "HOST_INVALID"
     };
   }
-  if (rawOrigin === null || rawOrigin.toLowerCase() === "null") {
+  if (rawOrigin === null) {
     return {
-      valid: true,
+      valid: false,
       normalizedHost,
-      normalizedOrigin: `http://${normalizedHost}`,
-      reason: null
+      normalizedOrigin: null,
+      reason: "ORIGIN_MISSING_OR_MULTIPLE"
+    };
+  }
+  if (rawOrigin.toLowerCase() === "null") {
+    return {
+      valid: false,
+      normalizedHost,
+      normalizedOrigin: "null",
+      reason: "ORIGIN_NULL"
     };
   }
 
