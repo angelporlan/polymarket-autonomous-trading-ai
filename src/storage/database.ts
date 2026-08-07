@@ -1094,8 +1094,10 @@ export class TradingDatabase {
       if (
         !proposal ||
         proposal.hash !== proposalHash ||
-        (proposal.status !== "STAGED" && proposal.status !== "LOCALLY_APPROVED" && proposal.status !== "AWAITING_LOCAL") ||
-        proposal.expiresAtMs < nowMs
+        proposal.status !== "STAGED" ||
+        proposal.expiresAtMs < nowMs ||
+        !verifyProposalHash(proposal) ||
+        proposal.executionMode !== "live"
       ) {
         this.db.exec("ROLLBACK");
         return false;
@@ -1110,24 +1112,31 @@ export class TradingDatabase {
           return false;
         }
         const session = parseWithBigInts<TradingSession>(sessionRow.payload_json);
-        if (nowMs >= session.expiresAtMs || session.remainingBudgetMicros < proposal.maxCostMicros) {
+        if (
+          nowMs >= session.expiresAtMs ||
+          session.executionMode !== "live" ||
+          (proposal.intent !== "EXIT" && session.remainingBudgetMicros < proposal.maxLossMicros)
+        ) {
           this.db.exec("ROLLBACK");
           return false;
         }
-        const newRemaining = session.remainingBudgetMicros - proposal.maxCostMicros;
-        const newStatus = newRemaining === 0n ? "EXHAUSTED" : "ACTIVE";
-        const updatedSession: TradingSession = {
-          ...session,
-          remainingBudgetMicros: newRemaining,
-          status: newStatus
-        };
-        this.db
-          .prepare(
-            `UPDATE trading_sessions
-             SET status = ?, payload_json = ?
-             WHERE id = ?`
-          )
-          .run(newStatus, stringifyWithBigInts(updatedSession), sessionId);
+
+        if (proposal.intent !== "EXIT") {
+          const newRemaining = session.remainingBudgetMicros - proposal.maxLossMicros;
+          const newStatus = newRemaining === 0n ? "EXHAUSTED" : "ACTIVE";
+          const updatedSession: TradingSession = {
+            ...session,
+            remainingBudgetMicros: newRemaining,
+            status: newStatus
+          };
+          this.db
+            .prepare(
+              `UPDATE trading_sessions
+               SET status = ?, payload_json = ?
+               WHERE id = ?`
+            )
+            .run(newStatus, stringifyWithBigInts(updatedSession), sessionId);
+        }
       }
 
       const transitioned = this.db
@@ -1137,7 +1146,7 @@ export class TradingDatabase {
                payload_json = ?,
                revision = revision + 1,
                updated_at_ms = ?
-           WHERE id = ? AND hash = ? AND (status = 'STAGED' OR status = 'LOCALLY_APPROVED' OR status = 'AWAITING_LOCAL')`
+           WHERE id = ? AND hash = ? AND status = 'STAGED'`
         )
         .run(
           stringifyWithBigInts({ ...proposal, status: "EXECUTING" }),
