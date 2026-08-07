@@ -4,11 +4,14 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type {
   ExecutionRecord,
+  ExecutionMode,
   LocalApproval,
   OrderProposal,
   PaperTrade,
+  PositionRecord,
   ProposalStatus
 } from "../domain/types.js";
+import type { TradingSession } from "../domain/session.js";
 import {
   canonicalCorrelationKey
 } from "../domain/types.js";
@@ -976,6 +979,199 @@ export class TradingDatabase {
     return row ? parseWithBigInts<PaperTrade>(row.payload_json) : null;
   }
 
+  saveTradingSession(session: TradingSession): void {
+    this.db
+      .prepare(
+        `INSERT INTO trading_sessions
+          (id, execution_mode, status, created_at_ms, expires_at_ms, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           status = excluded.status,
+           payload_json = excluded.payload_json`
+      )
+      .run(
+        session.id,
+        session.executionMode,
+        session.status,
+        session.createdAtMs,
+        session.expiresAtMs,
+        stringifyWithBigInts(session)
+      );
+    this.appendAudit("TRADING_SESSION_SAVED", session.id, {
+      executionMode: session.executionMode,
+      authorizedBudgetMicros: session.authorizedBudgetMicros,
+      remainingBudgetMicros: session.remainingBudgetMicros,
+      status: session.status
+    });
+  }
+
+  getTradingSession(id: string): TradingSession | null {
+    const row = this.db
+      .prepare("SELECT payload_json FROM trading_sessions WHERE id = ?")
+      .get(id) as ProposalRow | undefined;
+    return row ? parseWithBigInts<TradingSession>(row.payload_json) : null;
+  }
+
+  getActiveTradingSession(executionMode: ExecutionMode, nowMs = Date.now()): TradingSession | null {
+    const rows = this.db
+      .prepare(
+        `SELECT payload_json FROM trading_sessions
+         WHERE execution_mode = ? AND status = 'ACTIVE' AND expires_at_ms > ?
+         ORDER BY created_at_ms DESC`
+      )
+      .all(executionMode, nowMs) as unknown as ProposalRow[];
+
+    for (const row of rows) {
+      const session = parseWithBigInts<TradingSession>(row.payload_json);
+      if (session.remainingBudgetMicros > 0n) {
+        return session;
+      }
+    }
+    return null;
+  }
+
+  closeTradingSession(id: string, reason: string, nowMs = Date.now()): void {
+    const session = this.getTradingSession(id);
+    if (!session) return;
+    const updated: TradingSession = {
+      ...session,
+      status: "CLOSED",
+      closedReason: reason
+    };
+    this.saveTradingSession(updated);
+    this.appendAudit("TRADING_SESSION_CLOSED", id, { reason, closedAtMs: nowMs });
+  }
+
+  savePositionRecord(position: PositionRecord, nowMs = Date.now()): void {
+    this.db
+      .prepare(
+        `INSERT INTO position_records
+          (token_id, condition_id, side, exit_state, updated_at_ms, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(token_id) DO UPDATE SET
+           exit_state = excluded.exit_state,
+           updated_at_ms = excluded.updated_at_ms,
+           payload_json = excluded.payload_json`
+      )
+      .run(
+        position.tokenId,
+        position.conditionId,
+        position.side,
+        position.exitState,
+        nowMs,
+        stringifyWithBigInts(position)
+      );
+    this.appendAudit("POSITION_RECORD_SAVED", position.tokenId, {
+      conditionId: position.conditionId,
+      side: position.side,
+      exitState: position.exitState
+    });
+  }
+
+  getPositionRecord(tokenId: string): PositionRecord | null {
+    const row = this.db
+      .prepare("SELECT payload_json FROM position_records WHERE token_id = ?")
+      .get(tokenId) as ProposalRow | undefined;
+    return row ? parseWithBigInts<PositionRecord>(row.payload_json) : null;
+  }
+
+  listPositionRecords(): PositionRecord[] {
+    const rows = this.db
+      .prepare("SELECT payload_json FROM position_records ORDER BY updated_at_ms DESC")
+      .all() as unknown as ProposalRow[];
+    return rows.map((row) => parseWithBigInts<PositionRecord>(row.payload_json));
+  }
+
+  claimAutonomousExecution(
+    proposalId: string,
+    proposalHash: string,
+    sessionId: string | null,
+    nowMs: number
+  ): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const proposal = this.getProposal(proposalId);
+      if (
+        !proposal ||
+        proposal.hash !== proposalHash ||
+        (proposal.status !== "STAGED" && proposal.status !== "LOCALLY_APPROVED" && proposal.status !== "AWAITING_LOCAL") ||
+        proposal.expiresAtMs < nowMs
+      ) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+
+      if (sessionId) {
+        const sessionRow = this.db
+          .prepare("SELECT payload_json FROM trading_sessions WHERE id = ? AND status = 'ACTIVE'")
+          .get(sessionId) as ProposalRow | undefined;
+        if (!sessionRow) {
+          this.db.exec("ROLLBACK");
+          return false;
+        }
+        const session = parseWithBigInts<TradingSession>(sessionRow.payload_json);
+        if (nowMs >= session.expiresAtMs || session.remainingBudgetMicros < proposal.maxCostMicros) {
+          this.db.exec("ROLLBACK");
+          return false;
+        }
+        const newRemaining = session.remainingBudgetMicros - proposal.maxCostMicros;
+        const newStatus = newRemaining === 0n ? "EXHAUSTED" : "ACTIVE";
+        const updatedSession: TradingSession = {
+          ...session,
+          remainingBudgetMicros: newRemaining,
+          status: newStatus
+        };
+        this.db
+          .prepare(
+            `UPDATE trading_sessions
+             SET status = ?, payload_json = ?
+             WHERE id = ?`
+          )
+          .run(newStatus, stringifyWithBigInts(updatedSession), sessionId);
+      }
+
+      const transitioned = this.db
+        .prepare(
+          `UPDATE proposals
+           SET status = 'EXECUTING',
+               payload_json = ?,
+               revision = revision + 1,
+               updated_at_ms = ?
+           WHERE id = ? AND hash = ? AND (status = 'STAGED' OR status = 'LOCALLY_APPROVED' OR status = 'AWAITING_LOCAL')`
+        )
+        .run(
+          stringifyWithBigInts({ ...proposal, status: "EXECUTING" }),
+          nowMs,
+          proposalId,
+          proposalHash
+        );
+
+      const execution = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO executions
+            (proposal_id, proposal_hash, clob_order_id, status, submitted_at_ms, response_json)
+           VALUES (?, ?, NULL, 'CLAIMED', ?, '{}')`
+        )
+        .run(proposalId, proposalHash, nowMs);
+
+      if (transitioned.changes !== 1 || execution.changes !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+
+      this.appendAudit("AUTONOMOUS_EXECUTION_CLAIMED", proposalId, {
+        proposalHash,
+        sessionId,
+        claimedAtMs: nowMs
+      });
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   countAuditEvents(eventType: string): number {
     const row = this.db
       .prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type = ?")
@@ -1189,8 +1385,27 @@ export class TradingDatabase {
         event_hash TEXT NOT NULL UNIQUE
       );
 
+      CREATE TABLE IF NOT EXISTS trading_sessions (
+        id TEXT PRIMARY KEY,
+        execution_mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS position_records (
+        token_id TEXT PRIMARY KEY,
+        condition_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        exit_state TEXT NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
       CREATE INDEX IF NOT EXISTS idx_audit_subject ON audit_events(subject_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_mode_status ON trading_sessions(execution_mode, status);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_clob_order_id
         ON executions(clob_order_id)
         WHERE clob_order_id IS NOT NULL;
