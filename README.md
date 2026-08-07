@@ -16,6 +16,9 @@ El servidor expone por `stdio` estas herramientas MCP:
 | `get_market_snapshot` | Reglas, fuente de resolución, libro, tick, fees, liquidez y geoblock. |
 | `get_risk_status` | Límites inmutables, exposición, PnL diario y estado del piloto. |
 | `get_order_status` | Último estado, fills y fees validados y guardados en el ledger local. |
+| `prepare_trading_session` | Calcula capacidad y emite un challenge efímero; no activa una sesión. |
+| `activate_trading_session` | Consume una autorización local única y activa su presupuesto exacto. |
+| `get_trading_session` | Presupuesto autorizado, uso, restante, estado y expiración de la sesión. |
 | `stage_order` | Valida y persiste una propuesta inmutable; no firma ni envía. |
 | `execute_staged_order` | Ejecuta de forma autónoma una propuesta staged si cumple las reglas de riesgo, presupuesto de sesión y barreras live. |
 | `cancel_order` | Solicita cancelar una orden concreta; no declara el estado terminal sin conciliación. |
@@ -137,6 +140,7 @@ Scripts declarados en `package.json`:
 | `npm run test:watch` | Pruebas en modo interactivo. |
 | `npm run keychain:build` | Compila `bin/polymarket-keychain-helper`. |
 | `npm run onboard` | Alta local y comprobación de identidad/Keychain. |
+| `npm run session:authorize -- --pending [id] --amount [pUSD] --challenge [challenge]` | Registra la confirmación local única de una sesión preparada. |
 | `npm run smoke` | Comprobaciones de conectividad sin enviar órdenes. |
 | `npm run ledger:export -- [directorio] [quote.json]` | Exporta el ledger completo a JSON, los eventos a CSV y el resumen contable pUSD/EUR a `accounting.csv`. El quote EUR es opcional; sin él, EUR queda explícitamente no disponible. |
 
@@ -191,6 +195,18 @@ reconciliación, aprobación exacta y confirmación loopback. Es un override exp
 de configuración no secreta, no una autorización de live.
 
 ## Alta local
+
+Para iniciar una sesión de trading, el agente debe preparar primero la capacidad y la persona debe autorizarla localmente:
+
+```text
+prepare_trading_session
+    ↓
+npm run session:authorize -- --pending <id> --amount <pUSD> --challenge <challenge>
+    ↓
+activate_trading_session
+```
+
+La activación consume la autorización una sola vez. No existe una herramienta MCP que permita al agente elegir, renovar o ampliar el presupuesto directamente.
 
 Ejecuta los pasos desde un shell con la misma configuración no secreta que usará MCP:
 

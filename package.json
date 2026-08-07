@@ -14,6 +14,7 @@
     "dev": "tsx src/mcp/server.ts",
     "start": "node dist/mcp/server.js",
     "onboard": "tsx src/cli/onboard.ts",
+    "session:authorize": "tsx src/cli/session-authorize.ts",
     "smoke": "tsx src/cli/smoke.ts",
     "ledger:export": "tsx src/cli/export-ledger.ts",
     "keychain:build": "mkdir -p bin && swiftc native/keychain-helper.swift -framework AppKit -framework Security -framework LocalAuthentication -o bin/polymarket-keychain-helper",

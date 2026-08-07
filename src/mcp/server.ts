@@ -26,14 +26,16 @@ import {
   getPortfolioOutputSchema,
   getRiskStatusInputSchema,
   getRiskStatusOutputSchema,
-  getSessionStatusInputSchema,
-  getSessionStatusOutputSchema,
+  getTradingSessionInputSchema,
+  getTradingSessionOutputSchema,
   scanCandidatesInputSchema,
   scanCandidatesOutputSchema,
   stageOrderInputSchema,
   stageOrderOutputSchema,
-  startTradingSessionInputSchema,
-  startTradingSessionOutputSchema,
+  activateTradingSessionInputSchema,
+  activateTradingSessionOutputSchema,
+  prepareTradingSessionInputSchema,
+  prepareTradingSessionOutputSchema,
   supervisePositionsInputSchema,
   supervisePositionsOutputSchema,
   type CancelOrderInput,
@@ -54,14 +56,16 @@ import {
   type GetPortfolioOutput,
   type GetRiskStatusInput,
   type GetRiskStatusOutput,
-  type GetSessionStatusInput,
-  type GetSessionStatusOutput,
+  type GetTradingSessionInput,
+  type GetTradingSessionOutput,
   type ScanCandidatesInput,
   type ScanCandidatesOutput,
   type StageOrderInput,
   type StageOrderOutput,
-  type StartTradingSessionInput,
-  type StartTradingSessionOutput,
+  type ActivateTradingSessionInput,
+  type ActivateTradingSessionOutput,
+  type PrepareTradingSessionInput,
+  type PrepareTradingSessionOutput,
   type SupervisePositionsInput,
   type SupervisePositionsOutput
 } from "./schemas.js";
@@ -80,12 +84,15 @@ export interface McpToolDependencies {
   ): Awaitable<GetMarketSnapshotOutput>;
   getRiskStatus(input: GetRiskStatusInput): Awaitable<GetRiskStatusOutput>;
   getOrderStatus(input: GetOrderStatusInput): Awaitable<GetOrderStatusOutput>;
-  startTradingSession(
-    input: StartTradingSessionInput
-  ): Awaitable<StartTradingSessionOutput>;
-  getSessionStatus(
-    input: GetSessionStatusInput
-  ): Awaitable<GetSessionStatusOutput>;
+  prepareTradingSession(
+    input: PrepareTradingSessionInput
+  ): Awaitable<PrepareTradingSessionOutput>;
+  activateTradingSession(
+    input: ActivateTradingSessionInput
+  ): Awaitable<ActivateTradingSessionOutput>;
+  getTradingSession(
+    input: GetTradingSessionInput
+  ): Awaitable<GetTradingSessionOutput>;
   endTradingSession(
     input: EndTradingSessionInput
   ): Awaitable<EndTradingSessionOutput>;
@@ -129,6 +136,13 @@ const APPROVAL_ANNOTATIONS = Object.freeze({
   readOnlyHint: false,
   destructiveHint: true,
   idempotentHint: true,
+  openWorldHint: false
+}) satisfies ToolAnnotations;
+
+const SESSION_ACTIVATION_ANNOTATIONS = Object.freeze({
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
   openWorldHint: false
 }) satisfies ToolAnnotations;
 
@@ -247,34 +261,50 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
   );
 
   server.registerTool(
-    "start_trading_session",
+    "prepare_trading_session",
     {
-      title: "Start authorized trading session",
+      title: "Prepare trading session",
       description:
-        "Start or authorize a new trading session budget for paper or live mode. Auto-closes any prior active session in the same mode and caps budget to cash, exposure, and daily stop limits.",
-      inputSchema: startTradingSessionInputSchema,
-      outputSchema: startTradingSessionOutputSchema,
-      annotations: STAGE_ANNOTATIONS
+        "Calculate current safe session capacity and issue a short-lived one-time challenge for local human authorization. This does not activate a session.",
+      inputSchema: prepareTradingSessionInputSchema,
+      outputSchema: prepareTradingSessionOutputSchema,
+      annotations: READ_ANNOTATIONS
     },
     (input) =>
-      invokeStructured(startTradingSessionOutputSchema, () =>
-        deps.startTradingSession(input)
+      invokeStructured(prepareTradingSessionOutputSchema, () =>
+        deps.prepareTradingSession(input)
       )
   );
 
   server.registerTool(
-    "get_session_status",
+    "activate_trading_session",
     {
-      title: "Get trading session status",
+      title: "Activate trading session",
       description:
-        "Return the current active authorized trading session budget, remaining capacity, status, and expiration for paper or live mode.",
-      inputSchema: getSessionStatusInputSchema,
-      outputSchema: getSessionStatusOutputSchema,
+        "Consume exactly one locally recorded human authorization and activate its fixed budget. The agent cannot choose or increase the amount here.",
+      inputSchema: activateTradingSessionInputSchema,
+      outputSchema: activateTradingSessionOutputSchema,
+      annotations: SESSION_ACTIVATION_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(activateTradingSessionOutputSchema, () =>
+        deps.activateTradingSession(input)
+      )
+  );
+
+  server.registerTool(
+    "get_trading_session",
+    {
+      title: "Get trading session",
+      description:
+        "Return the current active session budget, used amount, remaining capacity, status, and expiration for paper or live mode.",
+      inputSchema: getTradingSessionInputSchema,
+      outputSchema: getTradingSessionOutputSchema,
       annotations: READ_ANNOTATIONS
     },
     (input) =>
-      invokeStructured(getSessionStatusOutputSchema, () =>
-        deps.getSessionStatus(input)
+      invokeStructured(getTradingSessionOutputSchema, () =>
+        deps.getTradingSession(input)
       )
   );
 

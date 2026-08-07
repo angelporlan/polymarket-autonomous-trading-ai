@@ -470,35 +470,64 @@ export const emergencyStopOutputSchema = z
   })
   .strict();
 
-export const startTradingSessionInputSchema = z
+export const tradingSessionStatusSchema = z.enum([
+  "ACTIVE",
+  "EXPIRED",
+  "EXHAUSTED",
+  "CLOSED"
+]);
+
+export const prepareTradingSessionInputSchema = z
   .object({
     executionMode: z.enum(["paper", "live"]).default("paper"),
-    authorizedBudgetPusd: positiveDecimalSchema,
-    ttlHours: z.number().positive().default(8)
+    ttlHours: z.number().positive().max(24).default(8)
   })
   .strict();
 
-export const startTradingSessionOutputSchema = z
+export const prepareTradingSessionOutputSchema = z
+  .object({
+    pendingSessionId: identifierSchema,
+    executionMode: z.enum(["paper", "live"]),
+    cashAvailablePusd: nonNegativeDecimalSchema.nullable(),
+    openExposurePusd: nonNegativeDecimalSchema,
+    hardCeilingRemainingPusd: nonNegativeDecimalSchema,
+    dailyStopRemainingPusd: nonNegativeDecimalSchema,
+    maximumAuthorizablePusd: positiveDecimalSchema,
+    challenge: z.string().regex(/^[A-Z0-9]{16,64}$/u),
+    expiresAt: timestampSchema
+  })
+  .strict();
+
+export const activateTradingSessionInputSchema = z
+  .object({
+    pendingSessionId: identifierSchema
+  })
+  .strict();
+
+export const tradingSessionOutputSchema = z
   .object({
     sessionId: identifierSchema,
     executionMode: z.enum(["paper", "live"]),
     authorizedBudgetPusd: positiveDecimalSchema,
-    remainingBudgetPusd: positiveDecimalSchema,
-    status: z.enum(["ACTIVE", "EXPIRED", "EXHAUSTED", "CLOSED"]),
+    usedBudgetPusd: nonNegativeDecimalSchema,
+    remainingBudgetPusd: nonNegativeDecimalSchema,
+    status: tradingSessionStatusSchema,
     createdAt: timestampSchema,
     expiresAt: timestampSchema
   })
   .strict();
 
-export const getSessionStatusInputSchema = z
+export const activateTradingSessionOutputSchema = tradingSessionOutputSchema;
+
+export const getTradingSessionInputSchema = z
   .object({
     executionMode: z.enum(["paper", "live"]).default("paper")
   })
   .strict();
 
-export const getSessionStatusOutputSchema = z
+export const getTradingSessionOutputSchema = z
   .object({
-    activeSession: startTradingSessionOutputSchema.nullable(),
+    activeSession: tradingSessionOutputSchema.nullable(),
     checkedAt: timestampSchema
   })
   .strict();
@@ -569,10 +598,12 @@ export type CancelOrderInput = z.infer<typeof cancelOrderInputSchema>;
 export type CancelOrderOutput = z.infer<typeof cancelOrderOutputSchema>;
 export type EmergencyStopInput = z.infer<typeof emergencyStopInputSchema>;
 export type EmergencyStopOutput = z.infer<typeof emergencyStopOutputSchema>;
-export type StartTradingSessionInput = z.infer<typeof startTradingSessionInputSchema>;
-export type StartTradingSessionOutput = z.infer<typeof startTradingSessionOutputSchema>;
-export type GetSessionStatusInput = z.infer<typeof getSessionStatusInputSchema>;
-export type GetSessionStatusOutput = z.infer<typeof getSessionStatusOutputSchema>;
+export type PrepareTradingSessionInput = z.infer<typeof prepareTradingSessionInputSchema>;
+export type PrepareTradingSessionOutput = z.infer<typeof prepareTradingSessionOutputSchema>;
+export type ActivateTradingSessionInput = z.infer<typeof activateTradingSessionInputSchema>;
+export type ActivateTradingSessionOutput = z.infer<typeof activateTradingSessionOutputSchema>;
+export type GetTradingSessionInput = z.infer<typeof getTradingSessionInputSchema>;
+export type GetTradingSessionOutput = z.infer<typeof getTradingSessionOutputSchema>;
 export type EndTradingSessionInput = z.infer<typeof endTradingSessionInputSchema>;
 export type EndTradingSessionOutput = z.infer<typeof endTradingSessionOutputSchema>;
 export type SupervisePositionsInput = z.infer<typeof supervisePositionsInputSchema>;

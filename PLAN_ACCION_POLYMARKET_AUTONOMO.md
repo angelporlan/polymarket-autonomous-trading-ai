@@ -200,10 +200,10 @@ Debe ser de solo lectura y devolver:
 
 Reglas:
 
-- [ ] En live, si el efectivo real es desconocido, responder con bloqueo.
-- [ ] No usar un fallback de 100 pUSD.
-- [ ] El challenge debe ser aleatorio, de un solo uso y de corta duración.
-- [ ] No debe existir todavía una sesión activa.
+- [x] En live, si el efectivo real es desconocido, responder con bloqueo.
+- [x] No usar un fallback de 100 pUSD.
+- [x] El challenge debe ser aleatorio, de un solo uso y de corta duración.
+- [x] No debe existir todavía una sesión activa.
 
 ### Confirmación local de una sola vez
 
@@ -234,11 +234,11 @@ La confirmación debe persistir:
 
 ### `activate_trading_session`
 
-- [ ] Consume atómicamente la confirmación local.
-- [ ] Crea la sesión activa.
-- [ ] No acepta una cantidad diferente de la confirmada.
-- [ ] No permite ampliar una sesión activa.
-- [ ] Una nueva sesión requiere una nueva confirmación humana.
+- [x] Consume atómicamente la confirmación local.
+- [x] Crea la sesión activa.
+- [x] No acepta una cantidad diferente de la confirmada.
+- [x] No permite ampliar una sesión activa.
+- [x] Una nueva sesión requiere una nueva confirmación humana.
 
 ### `get_trading_session`
 
@@ -264,13 +264,22 @@ min(
 
 ## Duración
 
-- [ ] Valor inicial recomendado: 8 horas.
-- [ ] Máximo permitido en esquema: 24 horas.
-- [ ] No aceptar duración arbitrariamente grande.
+- [x] Valor inicial recomendado: 8 horas.
+- [x] Máximo permitido en esquema: 24 horas.
+- [x] No aceptar duración arbitrariamente grande.
 
 ## Criterio de aceptación
 
 El agente no puede iniciar, renovar ni ampliar una sesión sin una nueva acción humana local verificable.
+
+## Evidencia de completado
+
+- Se eliminaron `start_trading_session` y `get_session_status` del contrato MCP. La ruta paper auxiliar tampoco crea sesiones automáticamente.
+- `prepare_trading_session` calcula la capacidad con efectivo real, exposición abierta, techo duro, stop diario y límite canary/piloto; live se bloquea si el efectivo es desconocido.
+- El challenge se genera aleatoriamente, caduca en 10 minutos y solo se persiste como SHA-256.
+- `session:authorize` valida challenge, importe máximo y ausencia de sesión activa; `activate_trading_session` consume la autorización y crea la sesión en una transacción SQLite atómica.
+- La activación revalida la capacidad actual y rechaza cualquier importe confirmado que ya no sea seguro; no existe ampliación automática.
+- Verificación: `npm run typecheck` correcto, `npm test` correcto (`24` archivos, `232` tests), `npm run build` correcto.
 
 ---
 

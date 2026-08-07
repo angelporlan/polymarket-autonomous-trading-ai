@@ -11,7 +11,13 @@ import type {
   PositionRecord,
   ProposalStatus
 } from "../domain/types.js";
-import type { TradingSession } from "../domain/session.js";
+import {
+  createTradingSession,
+  hashSessionChallenge,
+  type PendingTradingSession,
+  type SessionAuthorization,
+  type TradingSession
+} from "../domain/session.js";
 import {
   canonicalCorrelationKey
 } from "../domain/types.js";
@@ -1005,6 +1011,241 @@ export class TradingDatabase {
     });
   }
 
+  savePendingTradingSession(pending: PendingTradingSession): void {
+    this.db
+      .prepare(
+        `INSERT INTO pending_trading_sessions
+          (id, execution_mode, status, created_at_ms, expires_at_ms, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        pending.id,
+        pending.executionMode,
+        pending.status,
+        pending.createdAtMs,
+        pending.expiresAtMs,
+        stringifyWithBigInts(pending)
+      );
+    this.appendAudit("TRADING_SESSION_PREPARED", pending.id, {
+      executionMode: pending.executionMode,
+      maximumAuthorizableMicros: pending.maximumAuthorizableMicros,
+      expiresAtMs: pending.expiresAtMs
+    });
+  }
+
+  getPendingTradingSession(id: string, nowMs = Date.now()): PendingTradingSession | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload_json FROM pending_trading_sessions
+         WHERE id = ? AND status IN ('PENDING', 'AUTHORIZED') AND expires_at_ms > ?`
+      )
+      .get(id, nowMs) as ProposalRow | undefined;
+    return row ? parseWithBigInts<PendingTradingSession>(row.payload_json) : null;
+  }
+
+  getPendingTradingSessionForMode(
+    executionMode: ExecutionMode,
+    nowMs = Date.now()
+  ): PendingTradingSession | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload_json FROM pending_trading_sessions
+         WHERE execution_mode = ? AND status IN ('PENDING', 'AUTHORIZED')
+           AND expires_at_ms > ?
+         ORDER BY created_at_ms DESC LIMIT 1`
+      )
+      .get(executionMode, nowMs) as ProposalRow | undefined;
+    return row ? parseWithBigInts<PendingTradingSession>(row.payload_json) : null;
+  }
+
+  getSessionAuthorization(pendingSessionId: string): SessionAuthorization | null {
+    const row = this.db
+      .prepare(
+        `SELECT pending_session_id, amount_micros, challenge_hash,
+                confirmed_at_ms, consumed_at_ms
+         FROM session_authorizations WHERE pending_session_id = ?`
+      )
+      .get(pendingSessionId) as
+      | {
+          pending_session_id: string;
+          amount_micros: string;
+          challenge_hash: string;
+          confirmed_at_ms: number;
+          consumed_at_ms: number | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      pendingSessionId: row.pending_session_id,
+      amountMicros: BigInt(row.amount_micros),
+      challengeHash: row.challenge_hash,
+      confirmedAtMs: row.confirmed_at_ms,
+      consumedAtMs: row.consumed_at_ms
+    };
+  }
+
+  recordSessionAuthorization(
+    pendingSessionId: string,
+    amountMicros: bigint,
+    challenge: string,
+    nowMs = Date.now()
+  ): void {
+    if (amountMicros <= 0n) {
+      throw new Error("Authorized trading session budget must be positive.");
+    }
+    const challengeHash = hashSessionChallenge(challenge);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const pendingRow = this.db
+        .prepare(
+          `SELECT payload_json FROM pending_trading_sessions
+           WHERE id = ? AND status = 'PENDING'`
+        )
+        .get(pendingSessionId) as ProposalRow | undefined;
+      if (!pendingRow) {
+        throw new Error("Pending trading session is missing or already authorized.");
+      }
+      const pending = parseWithBigInts<PendingTradingSession>(pendingRow.payload_json);
+      if (nowMs >= pending.expiresAtMs) {
+        throw new Error("Pending trading session challenge has expired.");
+      }
+      if (pending.challengeHash !== challengeHash) {
+        throw new Error("Trading session challenge mismatch.");
+      }
+      if (amountMicros > pending.maximumAuthorizableMicros) {
+        throw new Error(
+          `Authorized amount exceeds the current maximum of ${pending.maximumAuthorizableMicros} micros.`
+        );
+      }
+      const active = this.db
+        .prepare(
+          `SELECT 1 FROM trading_sessions
+           WHERE execution_mode = ? AND status = 'ACTIVE' AND expires_at_ms > ?
+           LIMIT 1`
+        )
+        .get(pending.executionMode, nowMs);
+      if (active) {
+        throw new Error("An active trading session already exists.");
+      }
+      const existing = this.db
+        .prepare(
+          "SELECT 1 FROM session_authorizations WHERE pending_session_id = ?"
+        )
+        .get(pendingSessionId);
+      if (existing) {
+        throw new Error("Trading session authorization has already been used.");
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO session_authorizations
+            (pending_session_id, amount_micros, challenge_hash, confirmed_at_ms, consumed_at_ms)
+           VALUES (?, ?, ?, ?, NULL)`
+        )
+        .run(
+          pendingSessionId,
+          amountMicros.toString(),
+          challengeHash,
+          nowMs
+        );
+      const updated: PendingTradingSession = {
+        ...pending,
+        status: "AUTHORIZED"
+      };
+      this.db
+        .prepare(
+          `UPDATE pending_trading_sessions
+           SET status = ?, payload_json = ? WHERE id = ? AND status = 'PENDING'`
+        )
+        .run(updated.status, stringifyWithBigInts(updated), pendingSessionId);
+      this.appendAudit("TRADING_SESSION_AUTHORIZED", pendingSessionId, {
+        amountMicros,
+        challengeHash,
+        confirmedAtMs: nowMs
+      });
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  activateTradingSession(
+    pendingSessionId: string,
+    nowMs = Date.now()
+  ): TradingSession | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const pendingRow = this.db
+        .prepare(
+          `SELECT payload_json FROM pending_trading_sessions
+           WHERE id = ? AND status = 'AUTHORIZED' AND expires_at_ms > ?`
+        )
+        .get(pendingSessionId, nowMs) as ProposalRow | undefined;
+      const authorization = this.getSessionAuthorization(pendingSessionId);
+      if (!pendingRow || !authorization || authorization.consumedAtMs !== null) {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      const pending = parseWithBigInts<PendingTradingSession>(pendingRow.payload_json);
+      const active = this.db
+        .prepare(
+          `SELECT 1 FROM trading_sessions
+           WHERE execution_mode = ? AND status = 'ACTIVE' AND expires_at_ms > ?
+           LIMIT 1`
+        )
+        .get(pending.executionMode, nowMs);
+      if (active) {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+
+      const session = createTradingSession({
+        executionMode: pending.executionMode,
+        authorizedBudgetMicros: authorization.amountMicros,
+        ttlMs: pending.sessionTtlMs,
+        nowMs
+      });
+      this.saveTradingSession(session);
+      const updatedPending: PendingTradingSession = {
+        ...pending,
+        status: "ACTIVATED"
+      };
+      const pendingUpdate = this.db
+        .prepare(
+          `UPDATE pending_trading_sessions
+           SET status = ?, payload_json = ?
+           WHERE id = ? AND status = 'AUTHORIZED'`
+        )
+        .run(
+          updatedPending.status,
+          stringifyWithBigInts(updatedPending),
+          pendingSessionId
+        );
+      const authorizationUpdate = this.db
+        .prepare(
+          `UPDATE session_authorizations
+           SET consumed_at_ms = ?
+           WHERE pending_session_id = ? AND consumed_at_ms IS NULL`
+        )
+        .run(nowMs, pendingSessionId);
+      if (pendingUpdate.changes !== 1 || authorizationUpdate.changes !== 1) {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      this.appendAudit("TRADING_SESSION_ACTIVATED", session.id, {
+        pendingSessionId,
+        amountMicros: session.authorizedBudgetMicros,
+        activatedAtMs: nowMs
+      });
+      this.db.exec("COMMIT");
+      return session;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   getTradingSession(id: string): TradingSession | null {
     const row = this.db
       .prepare("SELECT payload_json FROM trading_sessions WHERE id = ?")
@@ -1403,6 +1644,23 @@ export class TradingDatabase {
         payload_json TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS pending_trading_sessions (
+        id TEXT PRIMARY KEY,
+        execution_mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS session_authorizations (
+        pending_session_id TEXT PRIMARY KEY REFERENCES pending_trading_sessions(id),
+        amount_micros TEXT NOT NULL,
+        challenge_hash TEXT NOT NULL,
+        confirmed_at_ms INTEGER NOT NULL,
+        consumed_at_ms INTEGER
+      );
+
       CREATE TABLE IF NOT EXISTS position_records (
         token_id TEXT PRIMARY KEY,
         condition_id TEXT NOT NULL,
@@ -1415,6 +1673,8 @@ export class TradingDatabase {
       CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
       CREATE INDEX IF NOT EXISTS idx_audit_subject ON audit_events(subject_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_mode_status ON trading_sessions(execution_mode, status);
+      CREATE INDEX IF NOT EXISTS idx_pending_sessions_mode_status
+        ON pending_trading_sessions(execution_mode, status);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_clob_order_id
         ON executions(clob_order_id)
         WHERE clob_order_id IS NOT NULL;

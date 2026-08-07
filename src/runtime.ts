@@ -19,6 +19,7 @@ import {
   type PaperTrade,
   type PortfolioSnapshot
 } from "./domain/types.js";
+import type { TradingSession } from "./domain/session.js";
 import {
   PublicMcpToolError,
   type McpToolDependencies
@@ -43,14 +44,16 @@ import type {
   GetOrderStatusOutput,
   GetPortfolioOutput,
   GetRiskStatusOutput,
-  GetSessionStatusInput,
-  GetSessionStatusOutput,
+  GetTradingSessionInput,
+  GetTradingSessionOutput,
   ScanCandidatesInput,
   ScanCandidatesOutput,
   StageOrderInput,
   StageOrderOutput,
-  StartTradingSessionInput,
-  StartTradingSessionOutput,
+  ActivateTradingSessionInput,
+  ActivateTradingSessionOutput,
+  PrepareTradingSessionInput,
+  PrepareTradingSessionOutput,
   SupervisePositionsInput,
   SupervisePositionsOutput
 } from "./mcp/schemas.js";
@@ -394,45 +397,54 @@ export class PolymarketRuntime {
     };
   }
 
-  async startTradingSession(
-    input: StartTradingSessionInput
-  ): Promise<StartTradingSessionOutput> {
+  async prepareTradingSession(
+    input: PrepareTradingSessionInput
+  ): Promise<PrepareTradingSessionOutput> {
     this.requireProfile();
-    const authorizedBudgetMicros = parseDecimalToMicros(input.authorizedBudgetPusd);
     const ttlMs = (input.ttlHours ?? 8) * 3600 * 1000;
-    const session = await this.service.startTradingSession({
+    const prepared = await this.service.prepareTradingSession({
       executionMode: input.executionMode,
-      authorizedBudgetMicros,
       ttlMs
     });
     return {
-      sessionId: session.id,
-      executionMode: session.executionMode,
-      authorizedBudgetPusd: formatMicros(session.authorizedBudgetMicros),
-      remainingBudgetPusd: formatMicros(session.remainingBudgetMicros),
-      status: session.status,
-      createdAt: new Date(session.createdAtMs).toISOString(),
-      expiresAt: new Date(session.expiresAtMs).toISOString()
+      pendingSessionId: prepared.pending.id,
+      executionMode: prepared.pending.executionMode,
+      cashAvailablePusd:
+        prepared.pending.cashAvailableMicros === null
+          ? null
+          : formatMicros(prepared.pending.cashAvailableMicros),
+      openExposurePusd: formatMicros(prepared.pending.openExposureMicros),
+      hardCeilingRemainingPusd: formatMicros(
+        prepared.pending.hardCeilingRemainingMicros
+      ),
+      dailyStopRemainingPusd: formatMicros(
+        prepared.pending.dailyStopRemainingMicros
+      ),
+      maximumAuthorizablePusd: formatMicros(
+        prepared.pending.maximumAuthorizableMicros
+      ),
+      challenge: prepared.challenge,
+      expiresAt: new Date(prepared.pending.expiresAtMs).toISOString()
     };
   }
 
-  async getSessionStatus(
-    input: GetSessionStatusInput
-  ): Promise<GetSessionStatusOutput> {
+  async activateTradingSession(
+    input: ActivateTradingSessionInput
+  ): Promise<ActivateTradingSessionOutput> {
+    this.requireProfile();
+    const session = await this.service.activateTradingSession(
+      input.pendingSessionId
+    );
+    return tradingSessionOutput(session);
+  }
+
+  async getTradingSession(
+    input: GetTradingSessionInput
+  ): Promise<GetTradingSessionOutput> {
     this.requireProfile();
     const active = await this.service.getActiveTradingSession(input.executionMode);
     return {
-      activeSession: active
-        ? {
-            sessionId: active.id,
-            executionMode: active.executionMode,
-            authorizedBudgetPusd: formatMicros(active.authorizedBudgetMicros),
-            remainingBudgetPusd: formatMicros(active.remainingBudgetMicros),
-            status: active.status,
-            createdAt: new Date(active.createdAtMs).toISOString(),
-            expiresAt: new Date(active.expiresAtMs).toISOString()
-          }
-        : null,
+      activeSession: active === null ? null : tradingSessionOutput(active),
       checkedAt: new Date().toISOString()
     };
   }
@@ -817,10 +829,12 @@ export async function createMcpToolDependencies(): Promise<McpToolDependencies> 
       guarded(() => runtime.getMarketSnapshot(input)),
     getRiskStatus: () => guarded(() => runtime.getRiskStatus()),
     getOrderStatus: (input) => guarded(() => runtime.getOrderStatus(input)),
-    startTradingSession: (input) =>
-      guarded(() => runtime.startTradingSession(input)),
-    getSessionStatus: (input) =>
-      guarded(() => runtime.getSessionStatus(input)),
+    prepareTradingSession: (input) =>
+      guarded(() => runtime.prepareTradingSession(input)),
+    activateTradingSession: (input) =>
+      guarded(() => runtime.activateTradingSession(input)),
+    getTradingSession: (input) =>
+      guarded(() => runtime.getTradingSession(input)),
     endTradingSession: (input) =>
       guarded(() => runtime.endTradingSession(input)),
     supervisePositions: (input) =>
@@ -955,6 +969,21 @@ function marketSnapshotOutput(
     })),
     geoblockStatus,
     capturedAt: new Date(market.capturedAtMs).toISOString()
+  };
+}
+
+function tradingSessionOutput(session: TradingSession) {
+  return {
+    sessionId: session.id,
+    executionMode: session.executionMode,
+    authorizedBudgetPusd: formatMicros(session.authorizedBudgetMicros),
+    usedBudgetPusd: formatMicros(
+      session.authorizedBudgetMicros - session.remainingBudgetMicros
+    ),
+    remainingBudgetPusd: formatMicros(session.remainingBudgetMicros),
+    status: session.status,
+    createdAt: new Date(session.createdAtMs).toISOString(),
+    expiresAt: new Date(session.expiresAtMs).toISOString()
   };
 }
 

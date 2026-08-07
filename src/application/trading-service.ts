@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   ProposalRejectedError,
   createOrderProposal,
@@ -28,10 +28,11 @@ import {
 } from "../domain/types.js";
 import { validateEvidenceSources } from "../domain/source-validator.js";
 import {
-  createTradingSession,
+  createPendingTradingSession,
+  hashSessionChallenge,
   isSessionValid,
   minBigInt,
-  type CreateSessionInput,
+  type PendingTradingSession,
   type TradingSession
 } from "../domain/session.js";
 import {
@@ -193,61 +194,60 @@ export class TradingService {
     return { proposal, execution, remote };
   }
 
-  async startTradingSession(input: CreateSessionInput): Promise<TradingSession> {
+  async prepareTradingSession(input: {
+    executionMode: "paper" | "live";
+    ttlMs?: number;
+  }): Promise<{ pending: PendingTradingSession; challenge: string }> {
     const nowMs = this.now();
-    const summary = await this.options.riskContexts.summary();
-    const openExposure = summary.totalOpenExposureMicros;
-    const dailyPnl = summary.dailyPnlMicros;
-
-    const hardCapRemaining =
-      RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD > openExposure
-        ? RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD - openExposure
-        : 0n;
-
-    const dailyLoss = dailyPnl < 0n ? -dailyPnl : 0n;
-    const dailyStopRemaining =
-      RISK_HARD_DAILY_STOP_PUSD > dailyLoss
-        ? RISK_HARD_DAILY_STOP_PUSD - dailyLoss
-        : 0n;
-
-    let availableCash = 100n * PUSD_SCALE;
-    try {
-      const portfolio = await this.getPortfolio();
-      if (portfolio.pUsdBalanceMicros !== null && portfolio.pUsdBalanceMicros >= 0n) {
-        availableCash = portfolio.pUsdBalanceMicros;
-      }
-    } catch {
-      // Keep default cash fallback
+    if (this.options.database.getActiveTradingSession(input.executionMode, nowMs)) {
+      throw new Error("An active trading session already exists.");
+    }
+    if (this.options.database.getPendingTradingSessionForMode(input.executionMode, nowMs)) {
+      throw new Error("A pending trading session authorization already exists.");
     }
 
-    const effectiveAuthorizedBudget = minBigInt(
-      input.authorizedBudgetMicros,
-      availableCash,
-      hardCapRemaining,
-      dailyStopRemaining
-    );
-
-    if (effectiveAuthorizedBudget <= 0n) {
-      throw new Error(
-        `Cannot authorize trading session: remaining capacity under exposure ceiling (${formatMicros(hardCapRemaining)} pUSD) or daily stop (${formatMicros(dailyStopRemaining)} pUSD) is zero.`
-      );
-    }
-
-    const existingActive = this.options.database.getActiveTradingSession(input.executionMode, nowMs);
-    if (existingActive) {
-      this.options.database.closeTradingSession(
-        existingActive.id,
-        "Superseded by newly authorized trading session",
-        nowMs
-      );
-    }
-
-    const session = createTradingSession({
-      ...input,
-      authorizedBudgetMicros: effectiveAuthorizedBudget,
+    const capacity = await this.getTradingSessionCapacity(input.executionMode);
+    const challenge = randomBytes(18).toString("hex").toUpperCase();
+    const pending = createPendingTradingSession({
+      ...capacity,
+      executionMode: input.executionMode,
+      challengeHash: hashSessionChallenge(challenge),
+      ...(input.ttlMs === undefined ? {} : { sessionTtlMs: input.ttlMs }),
       nowMs
     });
-    this.options.database.saveTradingSession(session);
+    this.options.database.savePendingTradingSession(pending);
+    return { pending, challenge };
+  }
+
+  async activateTradingSession(pendingSessionId: string): Promise<TradingSession> {
+    const nowMs = this.now();
+    const pending = this.options.database.getPendingTradingSession(
+      pendingSessionId,
+      nowMs
+    );
+    const authorization = this.options.database.getSessionAuthorization(
+      pendingSessionId
+    );
+    if (!pending || !authorization || authorization.consumedAtMs !== null) {
+      throw new Error("Pending trading session is missing, expired, or not locally authorized.");
+    }
+
+    const capacity = await this.getTradingSessionCapacity(pending.executionMode);
+    if (authorization.amountMicros > capacity.maximumAuthorizableMicros) {
+      throw new Error(
+        "The authorized amount exceeds the current safe session capacity; prepare a new session."
+      );
+    }
+
+    const session = this.options.database.activateTradingSession(
+      pendingSessionId,
+      nowMs
+    );
+    if (!session) {
+      throw new Error(
+        "Trading session activation failed because the authorization was consumed or another session is active."
+      );
+    }
     return session;
   }
 
@@ -259,6 +259,80 @@ export class TradingService {
 
   getActiveTradingSession(executionMode: "live" | "paper"): TradingSession | null {
     return this.options.database.getActiveTradingSession(executionMode, this.now());
+  }
+
+  private async getTradingSessionCapacity(
+    executionMode: "paper" | "live"
+  ): Promise<{
+    cashAvailableMicros: bigint | null;
+    openExposureMicros: bigint;
+    hardCeilingRemainingMicros: bigint;
+    dailyStopRemainingMicros: bigint;
+    maximumAuthorizableMicros: bigint;
+  }> {
+    const summary = await this.options.riskContexts.summary();
+    if (summary.emergencyStopped) {
+      throw new Error("Cannot prepare a trading session while the emergency stop is active.");
+    }
+    if (!summary.dailyPnlKnown) {
+      throw new Error("Cannot prepare a trading session while daily PnL is unknown.");
+    }
+    if (
+      summary.coolingDownUntilMs !== null &&
+      summary.coolingDownUntilMs > this.now()
+    ) {
+      throw new Error("Cannot prepare a trading session during the loss cooldown.");
+    }
+
+    let cashAvailableMicros: bigint | null = null;
+    try {
+      const portfolio = await this.getPortfolio();
+      cashAvailableMicros = portfolio.pUsdBalanceMicros;
+    } catch {
+      if (executionMode === "live") {
+        throw new Error("LIVE_SESSION_CASH_UNAVAILABLE: real cash could not be verified.");
+      }
+    }
+    if (executionMode === "live" && cashAvailableMicros === null) {
+      throw new Error("LIVE_SESSION_CASH_UNAVAILABLE: real cash could not be verified.");
+    }
+
+    const hardCeilingRemainingMicros = maxRemaining(
+      RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD,
+      summary.totalOpenExposureMicros
+    );
+    const dailyLossMicros = summary.dailyPnlMicros < 0n ? -summary.dailyPnlMicros : 0n;
+    const dailyStopRemainingMicros = maxRemaining(
+      RISK_HARD_DAILY_STOP_PUSD,
+      dailyLossMicros
+    );
+    const exposureLimitMicros =
+      summary.liveTradeCount < DEFAULT_RISK_POLICY.canaryTradeCount
+        ? DEFAULT_RISK_POLICY.canaryMaxOpenExposureMicros
+        : DEFAULT_RISK_POLICY.pilotMaxOpenExposureMicros;
+    const exposureCapacityMicros = maxRemaining(
+      exposureLimitMicros,
+      summary.totalOpenExposureMicros
+    );
+    const capacityInputs = [
+      hardCeilingRemainingMicros,
+      dailyStopRemainingMicros,
+      exposureCapacityMicros
+    ];
+    if (cashAvailableMicros !== null) {
+      capacityInputs.push(cashAvailableMicros);
+    }
+    const maximumAuthorizableMicros = minBigInt(...capacityInputs);
+    if (maximumAuthorizableMicros <= 0n) {
+      throw new Error("No safe trading session capacity remains.");
+    }
+    return {
+      cashAvailableMicros,
+      openExposureMicros: summary.totalOpenExposureMicros,
+      hardCeilingRemainingMicros,
+      dailyStopRemainingMicros,
+      maximumAuthorizableMicros
+    };
   }
 
   async stageOrder(input: StageOrderInput): Promise<StageOrderResult> {
@@ -1231,6 +1305,10 @@ function toExitReason(reason: ExitState): ExitReason {
     default:
       throw new Error("UNSUPPORTED_EXIT_REASON");
   }
+}
+
+function maxRemaining(limitMicros: bigint, usedMicros: bigint): bigint {
+  return limitMicros > usedMicros ? limitMicros - usedMicros : 0n;
 }
 
 function assertSameMarketContract(

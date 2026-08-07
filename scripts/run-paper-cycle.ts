@@ -9,15 +9,12 @@ async function main() {
   console.log("Profile Address:", status.profileAddress);
   console.log("Operating Status:", status.status);
 
-  // Authorize a paper session budget if not already active
-  const sessionStatus = await runtime.getSessionStatus({ executionMode: "paper" });
+  // A paper session must be prepared and authorized locally before this cycle.
+  const sessionStatus = await runtime.getTradingSession({ executionMode: "paper" });
   if (!sessionStatus.activeSession) {
-    console.log("Starting new authorized paper trading session ($50.00 pUSD)...");
-    await runtime.startTradingSession({
-      executionMode: "paper",
-      authorizedBudgetPusd: "50.000000",
-      ttlHours: 8
-    });
+    throw new Error(
+      "SESSION_REQUIRED: prepare a paper session, authorize it locally, then rerun this cycle."
+    );
   }
 
   // 1. Scan candidates

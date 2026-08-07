@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  createPendingTradingSession,
   createTradingSession,
+  hashSessionChallenge,
   isSessionValid,
   DEFAULT_SESSION_TTL_MS
 } from "../src/domain/session.js";
 import { PUSD_SCALE } from "../src/domain/types.js";
+import { TradingDatabase } from "../src/storage/database.js";
 
 describe("TradingSession", () => {
   it("creates a valid active session with authorized budget", () => {
@@ -50,5 +53,118 @@ describe("TradingSession", () => {
     const expiredCheck = isSessionValid(session, 5n * PUSD_SCALE, nowMs + DEFAULT_SESSION_TTL_MS + 1000);
     expect(expiredCheck.valid).toBe(false);
     expect(expiredCheck.reason).toContain("has expired");
+  });
+
+  it("requires one local challenge authorization and consumes it atomically", () => {
+    const nowMs = Date.now();
+    const database = new TradingDatabase(":memory:");
+    const challenge = "ABC123456789XYZ0";
+    const pending = createPendingTradingSession({
+      executionMode: "paper",
+      cashAvailableMicros: null,
+      openExposureMicros: 0n,
+      hardCeilingRemainingMicros: 100n * PUSD_SCALE,
+      dailyStopRemainingMicros: 10n * PUSD_SCALE,
+      maximumAuthorizableMicros: 10n * PUSD_SCALE,
+      challengeHash: hashSessionChallenge(challenge),
+      nowMs
+    });
+    database.savePendingTradingSession(pending);
+
+    database.recordSessionAuthorization(
+      pending.id,
+      5n * PUSD_SCALE,
+      challenge,
+      nowMs + 1
+    );
+    const authorization = database.getSessionAuthorization(pending.id);
+    expect(authorization).toMatchObject({
+      pendingSessionId: pending.id,
+      amountMicros: 5n * PUSD_SCALE,
+      challengeHash: hashSessionChallenge(challenge),
+      consumedAtMs: null
+    });
+
+    const session = database.activateTradingSession(pending.id, nowMs + 2);
+    expect(session).toMatchObject({
+      executionMode: "paper",
+      authorizedBudgetMicros: 5n * PUSD_SCALE,
+      remainingBudgetMicros: 5n * PUSD_SCALE,
+      status: "ACTIVE"
+    });
+    expect(database.activateTradingSession(pending.id, nowMs + 3)).toBeNull();
+    expect(database.getSessionAuthorization(pending.id)?.consumedAtMs).toBe(
+      nowMs + 2
+    );
+    expect(() =>
+      database.recordSessionAuthorization(
+        pending.id,
+        5n * PUSD_SCALE,
+        challenge,
+        nowMs + 4
+      )
+    ).toThrow(/already authorized|already been used/i);
+    database.close();
+  });
+
+  it("rejects a wrong challenge, an excessive amount, and a second active session", () => {
+    const nowMs = Date.now();
+    const database = new TradingDatabase(":memory:");
+    const pending = createPendingTradingSession({
+      executionMode: "paper",
+      cashAvailableMicros: null,
+      openExposureMicros: 0n,
+      hardCeilingRemainingMicros: 100n * PUSD_SCALE,
+      dailyStopRemainingMicros: 10n * PUSD_SCALE,
+      maximumAuthorizableMicros: 5n * PUSD_SCALE,
+      challengeHash: hashSessionChallenge("ABC123456789XYZ0"),
+      nowMs
+    });
+    database.savePendingTradingSession(pending);
+    expect(() =>
+      database.recordSessionAuthorization(
+        pending.id,
+        1n * PUSD_SCALE,
+        "WRONG123456789XYZ",
+        nowMs + 1
+      )
+    ).toThrow("Trading session challenge mismatch.");
+    expect(() =>
+      database.recordSessionAuthorization(
+        pending.id,
+        6n * PUSD_SCALE,
+        "ABC123456789XYZ0",
+        nowMs + 1
+      )
+    ).toThrow(/exceeds the current maximum/);
+
+    database.recordSessionAuthorization(
+      pending.id,
+      5n * PUSD_SCALE,
+      "ABC123456789XYZ0",
+      nowMs + 1
+    );
+    expect(database.activateTradingSession(pending.id, nowMs + 2)).not.toBeNull();
+
+    const secondPending = createPendingTradingSession({
+      executionMode: "paper",
+      cashAvailableMicros: null,
+      openExposureMicros: 0n,
+      hardCeilingRemainingMicros: 100n * PUSD_SCALE,
+      dailyStopRemainingMicros: 10n * PUSD_SCALE,
+      maximumAuthorizableMicros: 5n * PUSD_SCALE,
+      challengeHash: hashSessionChallenge("DEF123456789XYZ0"),
+      nowMs: nowMs + 3
+    });
+    database.savePendingTradingSession(secondPending);
+    expect(() =>
+      database.recordSessionAuthorization(
+        secondPending.id,
+        1n * PUSD_SCALE,
+        "DEF123456789XYZ0",
+        nowMs + 4
+      )
+    ).toThrow("An active trading session already exists.");
+    database.close();
   });
 });
