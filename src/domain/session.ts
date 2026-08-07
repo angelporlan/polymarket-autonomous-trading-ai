@@ -3,6 +3,17 @@ import { PUSD_SCALE, type ExecutionMode } from "./types.js";
 
 export type SessionStatus = "ACTIVE" | "EXPIRED" | "EXHAUSTED" | "CLOSED";
 
+export function minBigInt(...values: bigint[]): bigint {
+  if (values.length === 0) throw new Error("minBigInt requires at least one value.");
+  let min = values[0]!;
+  for (let i = 1; i < values.length; i++) {
+    if (values[i]! < min) {
+      min = values[i]!;
+    }
+  }
+  return min;
+}
+
 export interface TradingSession {
   id: string;
   executionMode: ExecutionMode;

@@ -6,6 +6,8 @@ import {
 } from "../domain/proposals.js";
 import {
   DEFAULT_RISK_POLICY,
+  RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD,
+  RISK_HARD_DAILY_STOP_PUSD,
   evaluateOrderRisk
 } from "../domain/risk-policy.js";
 import {
@@ -13,6 +15,7 @@ import {
   formatMicros,
   multiplyMicros,
   parseDecimalToMicros,
+  PUSD_SCALE,
   type MarketSnapshot,
   type OrderIntent,
   type OrderProposal,
@@ -24,6 +27,7 @@ import { validateEvidenceSources } from "../domain/source-validator.js";
 import {
   createTradingSession,
   isSessionValid,
+  minBigInt,
   type CreateSessionInput,
   type TradingSession
 } from "../domain/session.js";
@@ -186,9 +190,70 @@ export class TradingService {
     return { proposal, execution, remote };
   }
 
-  startTradingSession(input: CreateSessionInput): TradingSession {
-    const session = createTradingSession({ ...input, nowMs: this.now() });
-    this.options.database.saveTradingSession(session);
+  async startTradingSession(input: CreateSessionInput): Promise<TradingSession> {
+    const nowMs = this.now();
+    const summary = await this.options.riskContexts.summary();
+    const openExposure = summary.totalOpenExposureMicros;
+    const dailyPnl = summary.dailyPnlMicros;
+
+    const hardCapRemaining =
+      RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD > openExposure
+        ? RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD - openExposure
+        : 0n;
+
+    const dailyLoss = dailyPnl < 0n ? -dailyPnl : 0n;
+    const dailyStopRemaining =
+      RISK_HARD_DAILY_STOP_PUSD > dailyLoss
+        ? RISK_HARD_DAILY_STOP_PUSD - dailyLoss
+        : 0n;
+
+    let availableCash = 100n * PUSD_SCALE;
+    try {
+      const portfolio = await this.getPortfolio();
+      if (portfolio.pUsdBalanceMicros !== null && portfolio.pUsdBalanceMicros >= 0n) {
+        availableCash = portfolio.pUsdBalanceMicros;
+      }
+    } catch {
+      // Keep default cash fallback
+    }
+
+    const effectiveAuthorizedBudget = minBigInt(
+      input.authorizedBudgetMicros,
+      availableCash,
+      hardCapRemaining,
+      dailyStopRemaining
+    );
+
+    if (effectiveAuthorizedBudget <= 0n) {
+      throw new Error(
+        `Cannot authorize trading session: remaining capacity under exposure ceiling (${formatMicros(hardCapRemaining)} pUSD) or daily stop (${formatMicros(dailyStopRemaining)} pUSD) is zero.`
+      );
+    }
+
+    const existingActive = this.options.database.getActiveTradingSession(input.executionMode, nowMs);
+    if (existingActive) {
+      this.options.database.closeTradingSession(
+        existingActive.id,
+        "Superseded by newly authorized trading session",
+        nowMs
+      );
+    }
+
+    const session = createTradingSession({
+      ...input,
+      authorizedBudgetMicros: effectiveAuthorizedBudget,
+      nowMs
+    });
+    this.options.database.saveTradingSession(session, nowMs);
+    return session;
+  }
+
+  async closeTradingSession(sessionId: string, reason = "User closed session"): Promise<TradingSession> {
+    const nowMs = this.now();
+    const session = this.options.database.closeTradingSession(sessionId, reason, nowMs);
+    if (!session) {
+      throw new Error(`Trading session ${sessionId} not found.`);
+    }
     return session;
   }
 
@@ -214,17 +279,6 @@ export class TradingService {
     const estimatedProbabilityMicros = parseDecimalToMicros(
       input.estimatedProbability
     );
-    const orderCostMicros = multiplyMicros(limitPriceMicros, sharesMicros);
-
-    const sessionCheck = isSessionValid(activeSession, orderCostMicros, this.now());
-    if (!sessionCheck.valid) {
-      throw new ProposalRejectedError([
-        {
-          code: "SESSION_BUDGET_EXCEEDED",
-          message: sessionCheck.reason ?? "Insufficient session budget."
-        }
-      ]);
-    }
 
     if (input.executionMode === "live") {
       const status = await this.getAccountStatus();
@@ -283,6 +337,18 @@ export class TradingService {
         );
       }
       throw error;
+    }
+
+    if (proposal.intent !== "EXIT") {
+      const sessionCheck = isSessionValid(activeSession, proposal.maxLossMicros, this.now());
+      if (!sessionCheck.valid) {
+        throw new ProposalRejectedError([
+          {
+            code: "SESSION_BUDGET_EXCEEDED",
+            message: sessionCheck.reason ?? "Insufficient session budget including fee reservation."
+          }
+        ]);
+      }
     }
     this.options.database.stageProposal(proposal);
 
