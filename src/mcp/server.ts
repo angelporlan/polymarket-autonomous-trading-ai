@@ -12,6 +12,8 @@ import {
   cancelOrderOutputSchema,
   emergencyStopInputSchema,
   emergencyStopOutputSchema,
+  endTradingSessionInputSchema,
+  endTradingSessionOutputSchema,
   executeStagedOrderInputSchema,
   executeStagedOrderOutputSchema,
   getAccountStatusInputSchema,
@@ -24,14 +26,22 @@ import {
   getPortfolioOutputSchema,
   getRiskStatusInputSchema,
   getRiskStatusOutputSchema,
+  getSessionStatusInputSchema,
+  getSessionStatusOutputSchema,
   scanCandidatesInputSchema,
   scanCandidatesOutputSchema,
   stageOrderInputSchema,
   stageOrderOutputSchema,
+  startTradingSessionInputSchema,
+  startTradingSessionOutputSchema,
+  supervisePositionsInputSchema,
+  supervisePositionsOutputSchema,
   type CancelOrderInput,
   type CancelOrderOutput,
   type EmergencyStopInput,
   type EmergencyStopOutput,
+  type EndTradingSessionInput,
+  type EndTradingSessionOutput,
   type ExecuteStagedOrderInput,
   type ExecuteStagedOrderOutput,
   type GetAccountStatusInput,
@@ -44,18 +54,22 @@ import {
   type GetPortfolioOutput,
   type GetRiskStatusInput,
   type GetRiskStatusOutput,
+  type GetSessionStatusInput,
+  type GetSessionStatusOutput,
   type ScanCandidatesInput,
   type ScanCandidatesOutput,
   type StageOrderInput,
-  type StageOrderOutput
+  type StageOrderOutput,
+  type StartTradingSessionInput,
+  type StartTradingSessionOutput,
+  type SupervisePositionsInput,
+  type SupervisePositionsOutput
 } from "./schemas.js";
 
 export type Awaitable<T> = T | Promise<T>;
 
 /**
- * JSON-safe boundary implemented by the runtime. This interface deliberately has
- * no signing or order-submission method: execute_staged_order may only create a
- * short-lived local approval request.
+ * JSON-safe boundary implemented by the runtime.
  */
 export interface McpToolDependencies {
   getAccountStatus(input: GetAccountStatusInput): Awaitable<GetAccountStatusOutput>;
@@ -66,8 +80,20 @@ export interface McpToolDependencies {
   ): Awaitable<GetMarketSnapshotOutput>;
   getRiskStatus(input: GetRiskStatusInput): Awaitable<GetRiskStatusOutput>;
   getOrderStatus(input: GetOrderStatusInput): Awaitable<GetOrderStatusOutput>;
+  startTradingSession(
+    input: StartTradingSessionInput
+  ): Awaitable<StartTradingSessionOutput>;
+  getSessionStatus(
+    input: GetSessionStatusInput
+  ): Awaitable<GetSessionStatusOutput>;
+  endTradingSession(
+    input: EndTradingSessionInput
+  ): Awaitable<EndTradingSessionOutput>;
+  supervisePositions(
+    input: SupervisePositionsInput
+  ): Awaitable<SupervisePositionsOutput>;
   stageOrder(input: StageOrderInput): Awaitable<StageOrderOutput>;
-  createApprovalRequest(
+  executeStagedOrder(
     input: ExecuteStagedOrderInput
   ): Awaitable<ExecuteStagedOrderOutput>;
   cancelOrder(input: CancelOrderInput): Awaitable<CancelOrderOutput>;
@@ -221,11 +247,75 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
   );
 
   server.registerTool(
+    "start_trading_session",
+    {
+      title: "Start authorized trading session",
+      description:
+        "Start or authorize a new trading session budget for paper or live mode. Auto-closes any prior active session in the same mode and caps budget to cash, exposure, and daily stop limits.",
+      inputSchema: startTradingSessionInputSchema,
+      outputSchema: startTradingSessionOutputSchema,
+      annotations: STAGE_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(startTradingSessionOutputSchema, () =>
+        deps.startTradingSession(input)
+      )
+  );
+
+  server.registerTool(
+    "get_session_status",
+    {
+      title: "Get trading session status",
+      description:
+        "Return the current active authorized trading session budget, remaining capacity, status, and expiration for paper or live mode.",
+      inputSchema: getSessionStatusInputSchema,
+      outputSchema: getSessionStatusOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(getSessionStatusOutputSchema, () =>
+        deps.getSessionStatus(input)
+      )
+  );
+
+  server.registerTool(
+    "end_trading_session",
+    {
+      title: "End trading session",
+      description:
+        "Explicitly close and terminate the current active trading session for paper or live mode.",
+      inputSchema: endTradingSessionInputSchema,
+      outputSchema: endTradingSessionOutputSchema,
+      annotations: APPROVAL_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(endTradingSessionOutputSchema, () =>
+        deps.endTradingSession(input)
+      )
+  );
+
+  server.registerTool(
+    "supervise_positions",
+    {
+      title: "Supervise positions and execute exit policy",
+      description:
+        "Evaluate all open portfolio positions against stop-loss (-30%), take-profit (+50%), max hold (14 days), and edge disappearance rules. Auto-executes exit orders for triggered positions.",
+      inputSchema: supervisePositionsInputSchema,
+      outputSchema: supervisePositionsOutputSchema,
+      annotations: APPROVAL_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(supervisePositionsOutputSchema, () =>
+        deps.supervisePositions(input)
+      )
+  );
+
+  server.registerTool(
     "stage_order",
     {
       title: "Stage order",
       description:
-        "Validate policy and persist an immutable, expiring order proposal. This tool never signs or submits an order.",
+        "Validate policy and persist an immutable, expiring order proposal. Requires an active authorized trading session budget for live mode.",
       inputSchema: stageOrderInputSchema,
       outputSchema: stageOrderOutputSchema,
       annotations: STAGE_ANNOTATIONS
@@ -239,14 +329,14 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
     {
       title: "Execute staged order autonomously",
       description:
-        "Execute a staged proposal autonomously. Submits the order to Polymarket CLOB if live safety gates, session budget, and risk policy checks pass. Requires an active authorized trading session.",
+        "Execute a staged proposal autonomously. Submits the order to Polymarket CLOB if live safety gates, active session budget, and risk policy checks pass.",
       inputSchema: executeStagedOrderInputSchema,
       outputSchema: executeStagedOrderOutputSchema,
       annotations: APPROVAL_ANNOTATIONS
     },
     (input) =>
       invokeStructured(executeStagedOrderOutputSchema, () =>
-        deps.createApprovalRequest(input)
+        deps.executeStagedOrder(input)
       )
   );
 

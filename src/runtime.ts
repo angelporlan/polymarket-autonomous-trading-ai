@@ -387,20 +387,84 @@ export class PolymarketRuntime {
     };
   }
 
-  startTradingSession(input: { executionMode: "paper" | "live"; authorizedBudgetPusd: string; ttlHours?: number }) {
+  async startTradingSession(
+    input: StartTradingSessionInput
+  ): Promise<StartTradingSessionOutput> {
     this.requireProfile();
     const authorizedBudgetMicros = parseDecimalToMicros(input.authorizedBudgetPusd);
     const ttlMs = (input.ttlHours ?? 8) * 3600 * 1000;
-    return this.service.startTradingSession({
+    const session = await this.service.startTradingSession({
       executionMode: input.executionMode,
       authorizedBudgetMicros,
       ttlMs
     });
+    return {
+      sessionId: session.id,
+      executionMode: session.executionMode,
+      authorizedBudgetPusd: formatMicros(session.authorizedBudgetMicros),
+      remainingBudgetPusd: formatMicros(session.remainingBudgetMicros),
+      status: session.status,
+      createdAt: new Date(session.createdAtMs).toISOString(),
+      expiresAt: new Date(session.expiresAtMs).toISOString()
+    };
   }
 
-  getActiveTradingSession(executionMode: "paper" | "live") {
+  async getSessionStatus(
+    input: GetSessionStatusInput
+  ): Promise<GetSessionStatusOutput> {
     this.requireProfile();
-    return this.service.getActiveTradingSession(executionMode);
+    const active = await this.service.getActiveTradingSession(input.executionMode);
+    return {
+      activeSession: active
+        ? {
+            sessionId: active.id,
+            executionMode: active.executionMode,
+            authorizedBudgetPusd: formatMicros(active.authorizedBudgetMicros),
+            remainingBudgetPusd: formatMicros(active.remainingBudgetMicros),
+            status: active.status,
+            createdAt: new Date(active.createdAtMs).toISOString(),
+            expiresAt: new Date(active.expiresAtMs).toISOString()
+          }
+        : null,
+      checkedAt: new Date().toISOString()
+    };
+  }
+
+  async endTradingSession(
+    input: EndTradingSessionInput
+  ): Promise<EndTradingSessionOutput> {
+    this.requireProfile();
+    const active = await this.service.getActiveTradingSession(input.executionMode);
+    if (!active) {
+      throw new PublicMcpToolError("NO_ACTIVE_SESSION", "No active trading session was found.");
+    }
+    const closedSession = await this.service.closeTradingSession(active.id, input.reason);
+    return {
+      sessionId: closedSession.id,
+      closed: true,
+      closedAt: new Date(closedSession.closedAtMs ?? Date.now()).toISOString(),
+      message: `Trading session ${closedSession.id} closed.`
+    };
+  }
+
+  async supervisePositions(
+    _input?: SupervisePositionsInput
+  ): Promise<SupervisePositionsOutput> {
+    this.requireProfile();
+    const result = await this.service.supervisePositions();
+    return {
+      evaluatedPositionsCount: result.actions.length,
+      actions: result.actions.map((action) => ({
+        tokenId: action.tokenId,
+        conditionId: action.conditionId,
+        question: action.question,
+        shouldExit: action.shouldExit,
+        triggerReason: action.triggerReason,
+        explanation: action.explanation,
+        recommendedOrderSide: action.recommendedOrderSide
+      })),
+      evaluatedAt: new Date().toISOString()
+    };
   }
 
   async getOrderStatus(
@@ -496,9 +560,10 @@ export class PolymarketRuntime {
     return proposalOutput(result.proposal);
   }
 
-  async createApprovalRequest(
+  async executeStagedOrder(
     input: ExecuteStagedOrderInput
   ): Promise<ExecuteStagedOrderOutput> {
+    this.requireProfile();
     const proposal = this.database.getProposal(input.proposalId);
     if (!proposal || proposal.hash !== input.proposalHash) {
       throw new PublicMcpToolError(
@@ -513,9 +578,7 @@ export class PolymarketRuntime {
     return {
       proposalId: proposal.id,
       proposalHash: proposal.hash,
-      status: result.accepted ? "SUBMITTED" : "REJECTED",
-      approvalUrl: "http://127.0.0.1:8787/dashboard",
-      expiresAt: new Date(proposal.expiresAtMs).toISOString(),
+      status: result.accepted ? "EXECUTING" : "FAILED",
       message: result.message
     };
   }
@@ -743,9 +806,17 @@ export async function createMcpToolDependencies(): Promise<McpToolDependencies> 
       guarded(() => runtime.getMarketSnapshot(input)),
     getRiskStatus: () => guarded(() => runtime.getRiskStatus()),
     getOrderStatus: (input) => guarded(() => runtime.getOrderStatus(input)),
+    startTradingSession: (input) =>
+      guarded(() => runtime.startTradingSession(input)),
+    getSessionStatus: (input) =>
+      guarded(() => runtime.getSessionStatus(input)),
+    endTradingSession: (input) =>
+      guarded(() => runtime.endTradingSession(input)),
+    supervisePositions: (input) =>
+      guarded(() => runtime.supervisePositions(input)),
     stageOrder: (input) => guarded(() => runtime.stageOrder(input)),
-    createApprovalRequest: (input) =>
-      guarded(() => runtime.createApprovalRequest(input)),
+    executeStagedOrder: (input) =>
+      guarded(() => runtime.executeStagedOrder(input)),
     cancelOrder: (input) => guarded(() => runtime.cancelOrder(input)),
     emergencyStop: (input) => guarded(() => runtime.emergencyStop(input)),
     close: () => runtime.close()

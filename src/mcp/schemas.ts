@@ -323,6 +323,7 @@ export const getOrderStatusOutputSchema = z
 export const stageOrderInputSchema = z
   .object({
     executionMode: z.enum(["paper", "live"]).default("paper"),
+    intent: z.enum(["ENTRY", "EXIT"]).default("ENTRY"),
     tokenId: identifierSchema,
     conditionId: identifierSchema.optional(),
     outcome: z.string().trim().min(1).max(200),
@@ -346,21 +347,11 @@ export const executeStagedOrderInputSchema = z
   })
   .strict();
 
-export const loopbackApprovalUrlSchema = z
-  .string()
-  .url()
-  .refine((value) => {
-    const url = new URL(value);
-    return url.protocol === "http:" && url.hostname === "127.0.0.1";
-  }, "Approval URL must use http://127.0.0.1.");
-
 export const executeStagedOrderOutputSchema = z
   .object({
     proposalId: proposalIdSchema,
     proposalHash: proposalHashSchema,
-    status: z.enum(["AWAITING_LOCAL_CONFIRMATION", "SUBMITTED", "REJECTED"]),
-    approvalUrl: loopbackApprovalUrlSchema,
-    expiresAt: timestampSchema,
+    status: z.enum(["SUBMITTED", "FAILED", "EXECUTING"]),
     message: z.string().trim().min(1)
   })
   .strict();
@@ -442,6 +433,22 @@ export const getSessionStatusOutputSchema = z
   })
   .strict();
 
+export const endTradingSessionInputSchema = z
+  .object({
+    executionMode: z.enum(["paper", "live"]).default("paper"),
+    reason: z.string().trim().min(1).max(500).default("User requested session end")
+  })
+  .strict();
+
+export const endTradingSessionOutputSchema = z
+  .object({
+    sessionId: identifierSchema,
+    closed: z.boolean(),
+    closedAt: timestampSchema,
+    message: z.string().trim().min(1)
+  })
+  .strict();
+
 export const supervisePositionsInputSchema = z.object({}).strict();
 
 export const supervisePositionsOutputSchema = z
@@ -496,5 +503,7 @@ export type StartTradingSessionInput = z.infer<typeof startTradingSessionInputSc
 export type StartTradingSessionOutput = z.infer<typeof startTradingSessionOutputSchema>;
 export type GetSessionStatusInput = z.infer<typeof getSessionStatusInputSchema>;
 export type GetSessionStatusOutput = z.infer<typeof getSessionStatusOutputSchema>;
+export type EndTradingSessionInput = z.infer<typeof endTradingSessionInputSchema>;
+export type EndTradingSessionOutput = z.infer<typeof endTradingSessionOutputSchema>;
 export type SupervisePositionsInput = z.infer<typeof supervisePositionsInputSchema>;
 export type SupervisePositionsOutput = z.infer<typeof supervisePositionsOutputSchema>;
