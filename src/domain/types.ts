@@ -68,6 +68,7 @@ export interface OrderIntent {
   counterThesis: string;
   sources: EvidenceSource[];
   correlationKey: string;
+  intent?: "ENTRY" | "EXIT";
 }
 
 export interface RiskContext {
@@ -106,6 +107,11 @@ export interface RiskViolation {
     | "SPREAD_TOO_WIDE"
     | "INSUFFICIENT_DEPTH"
     | "SELL_EXCEEDS_POSITION"
+    | "HARD_CEILING_EXCEEDED"
+    | "DAILY_STOP_EXCEEDS_HARD_LIMIT"
+    | "SOURCE_VALIDATION_FAILED"
+    | "SESSION_BUDGET_EXCEEDED"
+    | "SESSION_INACTIVE"
     | "INVALID_VALUE";
   message: string;
 }
@@ -133,6 +139,33 @@ export interface OrderProposal {
   sources: EvidenceSource[];
   correlationKey: string;
   policyVersion: string;
+  intent?: "ENTRY" | "EXIT";
+}
+
+export type ExitState =
+  | "HOLDING"
+  | "STOP_LOSS_TRIGGERED"
+  | "TAKE_PROFIT_TRIGGERED"
+  | "MAX_DURATION_EXPIRED"
+  | "EDGE_DISAPPEARED"
+  | "REVALUATION_TRIGGERED"
+  | "CLOSING"
+  | "CLOSED";
+
+export interface PositionRecord {
+  tokenId: string;
+  conditionId: string;
+  question: string;
+  outcome: string;
+  side: OrderSide;
+  sharesMicros: bigint;
+  averagePriceMicros: bigint;
+  entryEdgeMicros: bigint;
+  openedAtMs: number;
+  lastEvaluatedAtMs: number;
+  lastProbabilityMicros: bigint;
+  sourcesJson: string;
+  exitState: ExitState;
 }
 
 export interface LocalApproval {

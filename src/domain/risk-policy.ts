@@ -9,6 +9,9 @@ import {
 
 export const RISK_POLICY_VERSION = "2026-07-pilot-v1";
 
+export const RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD = 100n * PUSD_SCALE;
+export const RISK_HARD_DAILY_STOP_PUSD = 10n * PUSD_SCALE;
+
 export interface RiskPolicy {
   capitalMicros: bigint;
   canaryMaxOrderMicros: bigint;
@@ -28,7 +31,26 @@ export interface RiskPolicy {
   depthMultiplier: bigint;
 }
 
-export const DEFAULT_RISK_POLICY: RiskPolicy = Object.freeze({
+export function validatePolicyAdjustments(policy: RiskPolicy): RiskPolicy {
+  if (policy.pilotMaxOpenExposureMicros > RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD) {
+    throw new Error(
+      `Policy adjustment rejected: pilotMaxOpenExposureMicros (${policy.pilotMaxOpenExposureMicros}) exceeds hard ceiling (${RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD})`
+    );
+  }
+  if (policy.canaryMaxOpenExposureMicros > RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD) {
+    throw new Error(
+      `Policy adjustment rejected: canaryMaxOpenExposureMicros (${policy.canaryMaxOpenExposureMicros}) exceeds hard ceiling (${RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD})`
+    );
+  }
+  if (policy.dailyStopMicros > RISK_HARD_DAILY_STOP_PUSD) {
+    throw new Error(
+      `Policy adjustment rejected: dailyStopMicros (${policy.dailyStopMicros}) exceeds hard daily stop (${RISK_HARD_DAILY_STOP_PUSD})`
+    );
+  }
+  return Object.freeze({ ...policy });
+}
+
+export const DEFAULT_RISK_POLICY: RiskPolicy = validatePolicyAdjustments({
   capitalMicros: 100n * PUSD_SCALE,
   canaryMaxOrderMicros: 5n * PUSD_SCALE,
   pilotMaxOrderMicros: 10n * PUSD_SCALE,
@@ -212,6 +234,20 @@ export function evaluateOrderRisk(
     violations.push({
       code: "TOTAL_EXPOSURE",
       message: "Total open exposure would exceed the current canary or pilot limit."
+    });
+  }
+
+  if (postTradeTotalExposureMicros > RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD) {
+    violations.push({
+      code: "HARD_CEILING_EXCEEDED",
+      message: `Total open exposure would exceed hard ceiling of ${RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD / PUSD_SCALE} pUSD.`
+    });
+  }
+
+  if (policy.dailyStopMicros > RISK_HARD_DAILY_STOP_PUSD) {
+    violations.push({
+      code: "DAILY_STOP_EXCEEDS_HARD_LIMIT",
+      message: `Policy daily stop exceeds hard ceiling daily stop of ${RISK_HARD_DAILY_STOP_PUSD / PUSD_SCALE} pUSD.`
     });
   }
 
