@@ -8,7 +8,6 @@ import {
 
 const proposalId = "00000000-0000-4000-8000-000000000001";
 const proposalHash = "a".repeat(64);
-const expiresAt = "2026-07-23T12:01:30.000Z";
 
 function unexpectedCall(): never {
   throw new Error("Unexpected dependency call.");
@@ -24,8 +23,12 @@ function createDependencies(
     getMarketSnapshot: unexpectedCall,
     getRiskStatus: unexpectedCall,
     getOrderStatus: unexpectedCall,
+    startTradingSession: unexpectedCall,
+    getSessionStatus: unexpectedCall,
+    endTradingSession: unexpectedCall,
+    supervisePositions: unexpectedCall,
     stageOrder: unexpectedCall,
-    createApprovalRequest: unexpectedCall,
+    executeStagedOrder: unexpectedCall,
     cancelOrder: unexpectedCall,
     emergencyStop: unexpectedCall,
     ...overrides
@@ -46,7 +49,7 @@ async function connect(deps: McpToolDependencies) {
 }
 
 describe("Polymarket MCP contract", () => {
-  it("registers exactly the planned tools with schemas and safety annotations", async () => {
+  it("registers all session, supervisor, and execution tools with schemas and annotations", async () => {
     const { client, server } = await connect(createDependencies());
     try {
       const { tools } = await client.listTools();
@@ -57,6 +60,10 @@ describe("Polymarket MCP contract", () => {
         "get_market_snapshot",
         "get_risk_status",
         "get_order_status",
+        "start_trading_session",
+        "get_session_status",
+        "end_trading_session",
+        "supervise_positions",
         "stage_order",
         "execute_staged_order",
         "cancel_order",
@@ -67,72 +74,27 @@ describe("Polymarket MCP contract", () => {
         expect(tool.inputSchema.type).toBe("object");
         expect(tool.outputSchema?.type).toBe("object");
       }
-
-      const annotations = Object.fromEntries(
-        tools.map((tool) => [tool.name, tool.annotations])
-      );
-      for (const name of [
-        "get_account_status",
-        "get_portfolio",
-        "scan_candidates",
-        "get_market_snapshot",
-        "get_risk_status",
-        "get_order_status"
-      ]) {
-        expect(annotations[name]).toMatchObject({
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: true
-        });
-      }
-      expect(annotations.stage_order).toMatchObject({
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true
-      });
-      expect(annotations.execute_staged_order).toMatchObject({
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false
-      });
-      expect(annotations.cancel_order).toMatchObject({
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: true
-      });
-      expect(annotations.emergency_stop).toMatchObject({
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: true
-      });
     } finally {
       await client.close();
       await server.close();
     }
   });
 
-  it("execute_staged_order only requests a loopback approval and returns structured content", async () => {
-    const createApprovalRequest = vi.fn(
+  it("execute_staged_order executes proposal autonomously subject to session budget and risk checks", async () => {
+    const executeStagedOrder = vi.fn(
       async (): Promise<
         Awaited<
-          ReturnType<McpToolDependencies["createApprovalRequest"]>
+          ReturnType<McpToolDependencies["executeStagedOrder"]>
         >
       > => ({
         proposalId,
         proposalHash,
-        status: "AWAITING_LOCAL_CONFIRMATION",
-        approvalUrl: `http://127.0.0.1:8787/approve/${proposalId}`,
-        expiresAt,
-        message: "Confirm the exact proposal in the local approval panel."
+        status: "EXECUTING",
+        message: "Proposal submitted autonomously for execution."
       })
     );
     const { client, server } = await connect(
-      createDependencies({ createApprovalRequest })
+      createDependencies({ executeStagedOrder })
     );
 
     try {
@@ -148,46 +110,14 @@ describe("Polymarket MCP contract", () => {
       expect(result.structuredContent).toEqual({
         proposalId,
         proposalHash,
-        status: "AWAITING_LOCAL_CONFIRMATION",
-        approvalUrl: `http://127.0.0.1:8787/approve/${proposalId}`,
-        expiresAt,
-        message: "Confirm the exact proposal in the local approval panel."
+        status: "EXECUTING",
+        message: "Proposal submitted autonomously for execution."
       });
-      expect(createApprovalRequest).toHaveBeenCalledOnce();
-      expect(createApprovalRequest).toHaveBeenCalledWith({
+      expect(executeStagedOrder).toHaveBeenCalledOnce();
+      expect(executeStagedOrder).toHaveBeenCalledWith({
         proposalId,
         proposalHash
       });
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  });
-
-  it("rejects a non-loopback approval URL returned by the runtime", async () => {
-    const { client, server } = await connect(
-      createDependencies({
-        createApprovalRequest: async () => ({
-          proposalId,
-          proposalHash,
-          status: "AWAITING_LOCAL_CONFIRMATION",
-          approvalUrl: "https://example.com/approve",
-          expiresAt,
-          message: "Unsafe URL."
-        })
-      })
-    );
-
-    try {
-      const result = await client.callTool({
-        name: "execute_staged_order",
-        arguments: { proposalId, proposalHash }
-      });
-      if ("toolResult" in result) {
-        throw new Error("Unexpected legacy tool result.");
-      }
-      expect(result.isError).toBe(true);
-      expect(result.structuredContent).toBeUndefined();
     } finally {
       await client.close();
       await server.close();

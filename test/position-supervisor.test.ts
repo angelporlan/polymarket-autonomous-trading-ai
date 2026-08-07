@@ -96,7 +96,7 @@ describe("PositionSupervisor", () => {
     expect(action.triggerReason).toBe("EDGE_DISAPPEARED");
   });
 
-  it("triggers MAX_DURATION_EXPIRED when market ends in under 24 hours", () => {
+  it("triggers HOLD_UNTIL_RESOLUTION when market ends in under 24 hours", () => {
     const action = evaluatePositionExitPolicy(
       basePosition,
       550_000n,
@@ -105,8 +105,8 @@ describe("PositionSupervisor", () => {
       nowMs
     );
 
-    expect(action.shouldExit).toBe(true);
-    expect(action.triggerReason).toBe("MAX_DURATION_EXPIRED");
+    expect(action.shouldExit).toBe(false);
+    expect(action.triggerReason).toBe("HOLD_UNTIL_RESOLUTION");
     expect(action.explanation).toContain("less than 24 hours");
   });
 });

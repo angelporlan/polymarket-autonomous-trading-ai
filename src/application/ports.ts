@@ -136,6 +136,7 @@ export interface ApprovalUrlPort {
 
 export interface StageOrderInput {
   executionMode: "paper" | "live";
+  intent?: "ENTRY" | "EXIT";
   conditionId: string;
   tokenId: string;
   outcome: string;

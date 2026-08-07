@@ -10,8 +10,8 @@ async function main() {
   console.log("Operating Status:", status.status);
 
   // Authorize a paper session budget if not already active
-  const activeSession = await runtime.getActiveTradingSession("paper");
-  if (!activeSession) {
+  const sessionStatus = await runtime.getSessionStatus({ executionMode: "paper" });
+  if (!sessionStatus.activeSession) {
     console.log("Starting new authorized paper trading session ($50.00 pUSD)...");
     await runtime.startTradingSession({
       executionMode: "paper",
@@ -69,6 +69,7 @@ async function main() {
   console.log("Staging Paper Order...");
   const staged = await runtime.stageOrder({
     executionMode: "paper",
+    intent: "ENTRY",
     conditionId: candidate.conditionId,
     tokenId,
     outcome: "Yes",
