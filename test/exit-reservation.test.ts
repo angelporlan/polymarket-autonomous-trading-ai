@@ -119,12 +119,17 @@ describe("live EXIT reservations", () => {
       side: "BUY",
       sharesMicros: 2n * PUSD_SCALE,
       averagePriceMicros: 500_000n,
+      entryProbabilityMicros: 550_000n,
       entryEdgeMicros: 50_000n,
       openedAtMs: NOW_MS - 2 * 24 * 60 * 60_000,
       lastEvaluatedAtMs: NOW_MS - 1_000,
-      lastProbabilityMicros: 500_000n,
+      lastMarketPriceMicros: 500_000n,
+      lastEstimatedProbabilityMicros: null,
+      lastResearchBundleId: null,
       sourcesJson: "[]",
-      exitState: "HOLDING"
+      exitState: "HOLDING",
+      activeExitProposalId: null,
+      activeExitOrderId: null
     }, NOW_MS);
 
     const service = new TradingService({

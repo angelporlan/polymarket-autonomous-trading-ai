@@ -14,12 +14,17 @@ describe("PositionSupervisor", () => {
     side: "BUY",
     sharesMicros: 100n * PUSD_SCALE,
     averagePriceMicros: 500_000n, // $0.50 entry
+    entryProbabilityMicros: 550_000n,
     entryEdgeMicros: 50_000n,
     openedAtMs: nowMs - 2 * 86400 * 1000, // 2 days ago
     lastEvaluatedAtMs: nowMs - 3600 * 1000,
-    lastProbabilityMicros: 600_000n,
+    lastMarketPriceMicros: 500_000n,
+    lastEstimatedProbabilityMicros: 600_000n,
+    lastResearchBundleId: "bundle-current",
     sourcesJson: "[]",
-    exitState: "HOLDING"
+    exitState: "HOLDING",
+    activeExitProposalId: null,
+    activeExitOrderId: null
   };
 
   it("recommends HOLDING for normal position", () => {
@@ -27,6 +32,7 @@ describe("PositionSupervisor", () => {
       basePosition,
       550_000n, // Current price $0.55 (+10%)
       650_000n, // Probability $0.65 (Edge $0.10)
+      "bundle-current",
       futureEndMs,
       nowMs
     );
@@ -41,6 +47,7 @@ describe("PositionSupervisor", () => {
       basePosition,
       340_000n, // Current price $0.34 (-32% loss vs $0.50 entry)
       400_000n,
+      "bundle-current",
       futureEndMs,
       nowMs
     );
@@ -55,6 +62,7 @@ describe("PositionSupervisor", () => {
       basePosition,
       760_000n, // Current price $0.76 (+52% gain vs $0.50 entry)
       850_000n,
+      "bundle-current",
       futureEndMs,
       nowMs
     );
@@ -74,6 +82,7 @@ describe("PositionSupervisor", () => {
       oldPosition,
       550_000n,
       650_000n,
+      "bundle-current",
       futureEndMs,
       nowMs
     );
@@ -84,10 +93,15 @@ describe("PositionSupervisor", () => {
   });
 
   it("triggers EDGE_DISAPPEARED when edge becomes <= 0", () => {
+    const edgePosition = {
+      ...basePosition,
+      lastMarketPriceMicros: 600_000n
+    };
     const action = evaluatePositionExitPolicy(
-      basePosition,
+      edgePosition,
       600_000n, // Price $0.60
       580_000n, // Probability $0.58 (Edge -0.02)
+      "bundle-current",
       futureEndMs,
       nowMs
     );
@@ -96,11 +110,45 @@ describe("PositionSupervisor", () => {
     expect(action.triggerReason).toBe("EDGE_DISAPPEARED");
   });
 
+  it("requires a fresh research bundle for edge exits and never treats price as probability", () => {
+    const action = evaluatePositionExitPolicy(
+      {
+        ...basePosition,
+        lastMarketPriceMicros: 600_000n,
+        lastEstimatedProbabilityMicros: null,
+        lastResearchBundleId: null
+      },
+      600_000n,
+      null,
+      null,
+      futureEndMs,
+      nowMs
+    );
+
+    expect(action.shouldExit).toBe(false);
+    expect(action.triggerReason).toBe("HOLDING");
+  });
+
+  it("requests research after a 20% market-price move without selling", () => {
+    const action = evaluatePositionExitPolicy(
+      basePosition,
+      600_000n,
+      650_000n,
+      "bundle-current",
+      futureEndMs,
+      nowMs
+    );
+
+    expect(action.shouldExit).toBe(false);
+    expect(action.triggerReason).toBe("RESEARCH_REQUIRED");
+  });
+
   it("triggers HOLD_UNTIL_RESOLUTION when market ends in under 24 hours", () => {
     const action = evaluatePositionExitPolicy(
       basePosition,
       550_000n,
       650_000n,
+      "bundle-current",
       nowMs + 12 * 3600 * 1000, // Resolution in 12h
       nowMs
     );

@@ -160,6 +160,7 @@ export type ExitState =
   | "TAKE_PROFIT_TRIGGERED"
   | "MAX_DURATION_EXPIRED"
   | "EDGE_DISAPPEARED"
+  | "RESEARCH_REQUIRED"
   | "REVALUATION_TRIGGERED"
   | "HOLD_UNTIL_RESOLUTION"
   | "LEGACY_UNVERIFIED"
@@ -174,12 +175,17 @@ export interface PositionRecord {
   side: OrderSide;
   sharesMicros: bigint;
   averagePriceMicros: bigint;
-  entryEdgeMicros: bigint;
+  entryProbabilityMicros: bigint | null;
+  entryEdgeMicros: bigint | null;
   openedAtMs: number;
   lastEvaluatedAtMs: number;
-  lastProbabilityMicros: bigint;
+  lastMarketPriceMicros: bigint;
+  lastEstimatedProbabilityMicros: bigint | null;
+  lastResearchBundleId: string | null;
   sourcesJson: string;
   exitState: ExitState;
+  activeExitProposalId: string | null;
+  activeExitOrderId: string | null;
 }
 
 export interface LocalApproval {

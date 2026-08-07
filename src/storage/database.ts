@@ -1472,14 +1472,18 @@ export class TradingDatabase {
     const row = this.db
       .prepare("SELECT payload_json FROM position_records WHERE token_id = ?")
       .get(tokenId) as ProposalRow | undefined;
-    return row ? parseWithBigInts<PositionRecord>(row.payload_json) : null;
+    return row
+      ? normalizePositionRecord(parseWithBigInts<Record<string, unknown>>(row.payload_json))
+      : null;
   }
 
   listPositionRecords(): PositionRecord[] {
     const rows = this.db
       .prepare("SELECT payload_json FROM position_records ORDER BY updated_at_ms DESC")
       .all() as unknown as ProposalRow[];
-    return rows.map((row) => parseWithBigInts<PositionRecord>(row.payload_json));
+    return rows.map((row) =>
+      normalizePositionRecord(parseWithBigInts<Record<string, unknown>>(row.payload_json))
+    );
   }
 
   getReservedExitShares(tokenId: string, nowMs = Date.now()): bigint {
@@ -1894,6 +1898,29 @@ export class TradingDatabase {
         WHERE clob_order_id IS NOT NULL;
     `);
   }
+}
+
+function normalizePositionRecord(value: Record<string, unknown>): PositionRecord {
+  const legacyLastProbabilityMicros = value.lastProbabilityMicros;
+  const {
+    lastProbabilityMicros: _legacyLastProbabilityMicros,
+    ...withoutLegacyProbability
+  } = value;
+  const record = withoutLegacyProbability as Partial<PositionRecord>;
+  return {
+    ...(record as PositionRecord),
+    entryProbabilityMicros: record.entryProbabilityMicros ?? null,
+    entryEdgeMicros: record.entryEdgeMicros ?? null,
+    lastMarketPriceMicros:
+      record.lastMarketPriceMicros ??
+      (typeof legacyLastProbabilityMicros === "bigint"
+        ? legacyLastProbabilityMicros
+        : 0n),
+    lastEstimatedProbabilityMicros: record.lastEstimatedProbabilityMicros ?? null,
+    lastResearchBundleId: record.lastResearchBundleId ?? null,
+    activeExitProposalId: record.activeExitProposalId ?? null,
+    activeExitOrderId: record.activeExitOrderId ?? null
+  };
 }
 
 function normalizeAddress(value: string): string {

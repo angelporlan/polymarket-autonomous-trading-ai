@@ -527,6 +527,14 @@ por defecto: HOLD_UNTIL_RESOLUTION
 10. persistir resultado
 ```
 
+## Evidencia de completado
+
+- `PositionRecord` separa `lastMarketPriceMicros`, `lastEstimatedProbabilityMicros`, `lastResearchBundleId`, probabilidades/edge de entrada y los IDs de la salida activa; los registros antiguos se normalizan sin convertir silenciosamente el precio en probabilidad.
+- El supervisor aplica stop-loss al 70%, take-profit al 150%, duración máxima de 14 días y conserva `HOLD_UNTIL_RESOLUTION` durante la ventana de 24 horas.
+- Un movimiento de precio del 20% produce `RESEARCH_REQUIRED` sin vender; la pérdida de edge queda bloqueada hasta recibir probabilidad y bundle de research válidos.
+- La salida usa probabilidad `0` cuando aún no existe estimación, únicamente como valor neutro de transporte para `EXIT`; nunca reutiliza el precio de mercado como probabilidad.
+- Verificación: `npm run typecheck` correcto y `test/position-supervisor.test.ts` pasa con cobertura de thresholds, ausencia de fallback, bundle requerido y shock del 20%.
+
 ---
 
 # P6 — Verificación real de investigación y fuentes

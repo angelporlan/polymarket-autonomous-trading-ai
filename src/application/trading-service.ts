@@ -613,19 +613,42 @@ export class TradingService {
           side: "BUY",
           sharesMicros: p.sizeMicros,
           averagePriceMicros: p.averagePriceMicros,
-          entryEdgeMicros: 0n,
+          entryProbabilityMicros: null,
+          entryEdgeMicros: null,
           openedAtMs: nowMs,
           lastEvaluatedAtMs: nowMs,
-          lastProbabilityMicros: p.currentPriceMicros,
+          lastMarketPriceMicros: p.currentPriceMicros,
+          lastEstimatedProbabilityMicros: null,
+          lastResearchBundleId: null,
           sourcesJson: "[]",
-          exitState: "LEGACY_UNVERIFIED"
+          exitState: "LEGACY_UNVERIFIED",
+          activeExitProposalId: null,
+          activeExitOrderId: null
+        };
+      }
+
+      const activeExecution = rec.activeExitProposalId
+        ? this.options.database.getExecution(rec.activeExitProposalId)
+        : null;
+      if (
+        activeExecution &&
+        ["CANCELLED", "CANCELED", "EXPIRED", "CONFIRMED", "REJECTED"].includes(
+          activeExecution.status.toUpperCase()
+        )
+      ) {
+        rec = {
+          ...rec,
+          activeExitProposalId: null,
+          activeExitOrderId: null,
+          exitState: p.sizeMicros === 0n ? "CLOSED" : "HOLDING"
         };
       }
 
       const action = evaluatePositionExitPolicy(
         rec,
         p.currentPriceMicros,
-        rec.lastProbabilityMicros > 0n ? rec.lastProbabilityMicros : p.currentPriceMicros,
+        null,
+        null,
         p.endTimeMs,
         nowMs
       );
@@ -635,11 +658,19 @@ export class TradingService {
         sharesMicros: p.sizeMicros,
         averagePriceMicros: p.averagePriceMicros,
         lastEvaluatedAtMs: nowMs,
-        lastProbabilityMicros: p.currentPriceMicros,
-        exitState: action.shouldExit ? action.triggerReason : rec.exitState
+        lastMarketPriceMicros: p.currentPriceMicros,
+        exitState:
+          rec.exitState === "CLOSING" || rec.exitState === "CLOSED"
+            ? rec.exitState
+            : action.triggerReason
       };
 
-      if (action.shouldExit && rec.exitState !== "CLOSING" && rec.exitState !== "CLOSED") {
+      if (
+        action.shouldExit &&
+        rec.activeExitProposalId === null &&
+        rec.exitState !== "CLOSING" &&
+        rec.exitState !== "CLOSED"
+      ) {
         try {
           const snapshot = await this.getMarketSnapshot({ conditionId: p.conditionId, tokenId: p.tokenId, outcome: p.outcome });
           if (snapshot.bestBidMicros <= 0n) {
@@ -658,7 +689,10 @@ export class TradingService {
             side: "SELL",
             shares: sharesPusd,
             limitPrice: limitPricePusd,
-            estimatedProbability: limitPricePusd,
+            estimatedProbability:
+              rec.lastEstimatedProbabilityMicros === null
+                ? "0"
+                : formatMicros(rec.lastEstimatedProbabilityMicros),
             exitReason,
             thesis: `Position exit supervisor auto-execution triggered: ${action.triggerReason}. ${action.explanation}`,
             counterThesis: "Position supervisor exit policy execution mandated to control downside risk.",
@@ -680,7 +714,11 @@ export class TradingService {
             ]
           });
 
-          let exitAccepted = staged.proposal.executionMode === "paper";
+          let exitAccepted =
+            staged.proposal.executionMode === "paper" &&
+            staged.paperTrade !== null &&
+            staged.paperTrade.filledSharesMicros > 0n;
+          let exitOrderId: string | null = null;
           if (staged.proposal.executionMode === "live") {
             const result = await this.executeStagedProposal(
               staged.proposal.id,
@@ -689,9 +727,23 @@ export class TradingService {
             exitAccepted =
               result.accepted &&
               this.options.database.getExecution(staged.proposal.id) !== null;
+            exitOrderId =
+              this.options.database.getExecution(staged.proposal.id)?.clobOrderId ??
+              null;
           }
           if (exitAccepted) {
-            rec = { ...rec, exitState: "CLOSING" };
+            rec = {
+              ...rec,
+              exitState: "CLOSING",
+              activeExitProposalId: staged.proposal.id,
+              activeExitOrderId: exitOrderId
+            };
+          } else {
+            rec = {
+              ...rec,
+              activeExitProposalId: null,
+              activeExitOrderId: null
+            };
           }
         } catch {
           // Retain state if execution fails safely
