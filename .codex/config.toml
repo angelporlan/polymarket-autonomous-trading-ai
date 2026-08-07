@@ -1,0 +1,23 @@
+[mcp_servers.polymarket]
+enabled = true
+required = false
+command = "node"
+args = ["dist/mcp/server.js"]
+cwd = "/Users/angel/devp/polymarket"
+startup_timeout_sec = 15
+tool_timeout_sec = 60
+
+# Only non-secret values belong here. Replace the zero address with the public
+# Polymarket profile address before using read or paper mode.
+[mcp_servers.polymarket.env]
+POLYMARKET_PROFILE_ADDRESS = "0xe6720944e451ad8a650278961d4c30817e91b0b7"
+POLYMARKET_DB_PATH = "./data/polymarket.sqlite"
+POLYMARKET_APPROVAL_HOST = "127.0.0.1"
+POLYMARKET_APPROVAL_PORT = "8787"
+POLYMARKET_LIVE_ENABLED = "true"
+PAPER_GATE_SKIP = "true"
+POLYGON_RPC_URLS = "https://polygon-rpc.com,https://polygon-bor-rpc.publicnode.com"
+POLYMARKET_KEYCHAIN_SERVICE = "codex-polymarket-guarded"
+# Live also requires POLYGON_RPC_URLS with two credential-free HTTPS origins.
+# Keep it outside this example until real public endpoints have been selected;
+# CLI commands must receive the same non-secret value in their shell environment.

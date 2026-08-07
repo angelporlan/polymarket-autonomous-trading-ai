@@ -1,0 +1,38 @@
+{
+  "name": "codex-polymarket-guarded",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local, approval-gated Polymarket MCP server for Codex.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "dev": "tsx src/mcp/server.ts",
+    "start": "node dist/mcp/server.js",
+    "onboard": "tsx src/cli/onboard.ts",
+    "smoke": "tsx src/cli/smoke.ts",
+    "ledger:export": "tsx src/cli/export-ledger.ts",
+    "keychain:build": "mkdir -p bin && swiftc native/keychain-helper.swift -framework AppKit -framework Security -framework LocalAuthentication -o bin/polymarket-keychain-helper",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@polymarket/clob-client-v2": "1.1.0",
+    "viem": "2.55.8",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  },
+  "overrides": {
+    "ws": "8.21.0"
+  }
+}

@@ -1,0 +1,400 @@
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type {
+  CallToolResult,
+  ToolAnnotations
+} from "@modelcontextprotocol/sdk/types.js";
+import type { z } from "zod/v4";
+import {
+  cancelOrderInputSchema,
+  cancelOrderOutputSchema,
+  emergencyStopInputSchema,
+  emergencyStopOutputSchema,
+  executeStagedOrderInputSchema,
+  executeStagedOrderOutputSchema,
+  getAccountStatusInputSchema,
+  getAccountStatusOutputSchema,
+  getMarketSnapshotInputSchema,
+  getMarketSnapshotOutputSchema,
+  getOrderStatusInputSchema,
+  getOrderStatusOutputSchema,
+  getPortfolioInputSchema,
+  getPortfolioOutputSchema,
+  getRiskStatusInputSchema,
+  getRiskStatusOutputSchema,
+  scanCandidatesInputSchema,
+  scanCandidatesOutputSchema,
+  stageOrderInputSchema,
+  stageOrderOutputSchema,
+  type CancelOrderInput,
+  type CancelOrderOutput,
+  type EmergencyStopInput,
+  type EmergencyStopOutput,
+  type ExecuteStagedOrderInput,
+  type ExecuteStagedOrderOutput,
+  type GetAccountStatusInput,
+  type GetAccountStatusOutput,
+  type GetMarketSnapshotInput,
+  type GetMarketSnapshotOutput,
+  type GetOrderStatusInput,
+  type GetOrderStatusOutput,
+  type GetPortfolioInput,
+  type GetPortfolioOutput,
+  type GetRiskStatusInput,
+  type GetRiskStatusOutput,
+  type ScanCandidatesInput,
+  type ScanCandidatesOutput,
+  type StageOrderInput,
+  type StageOrderOutput
+} from "./schemas.js";
+
+export type Awaitable<T> = T | Promise<T>;
+
+/**
+ * JSON-safe boundary implemented by the runtime. This interface deliberately has
+ * no signing or order-submission method: execute_staged_order may only create a
+ * short-lived local approval request.
+ */
+export interface McpToolDependencies {
+  getAccountStatus(input: GetAccountStatusInput): Awaitable<GetAccountStatusOutput>;
+  getPortfolio(input: GetPortfolioInput): Awaitable<GetPortfolioOutput>;
+  scanCandidates(input: ScanCandidatesInput): Awaitable<ScanCandidatesOutput>;
+  getMarketSnapshot(
+    input: GetMarketSnapshotInput
+  ): Awaitable<GetMarketSnapshotOutput>;
+  getRiskStatus(input: GetRiskStatusInput): Awaitable<GetRiskStatusOutput>;
+  getOrderStatus(input: GetOrderStatusInput): Awaitable<GetOrderStatusOutput>;
+  stageOrder(input: StageOrderInput): Awaitable<StageOrderOutput>;
+  createApprovalRequest(
+    input: ExecuteStagedOrderInput
+  ): Awaitable<ExecuteStagedOrderOutput>;
+  cancelOrder(input: CancelOrderInput): Awaitable<CancelOrderOutput>;
+  emergencyStop(input: EmergencyStopInput): Awaitable<EmergencyStopOutput>;
+  close?(): Awaitable<void>;
+}
+
+export class PublicMcpToolError extends Error {
+  constructor(
+    readonly code: string,
+    readonly publicMessage: string
+  ) {
+    super(publicMessage);
+    this.name = "PublicMcpToolError";
+  }
+}
+
+const READ_ANNOTATIONS = Object.freeze({
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true
+}) satisfies ToolAnnotations;
+
+const STAGE_ANNOTATIONS = Object.freeze({
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true
+}) satisfies ToolAnnotations;
+
+const APPROVAL_ANNOTATIONS = Object.freeze({
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false
+}) satisfies ToolAnnotations;
+
+const EXTERNAL_SAFETY_ACTION_ANNOTATIONS = Object.freeze({
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: true
+}) satisfies ToolAnnotations;
+
+export function createMcpServer(deps: McpToolDependencies): McpServer {
+  const server = new McpServer(
+    {
+      name: "codex-polymarket-guarded",
+      version: "0.1.0"
+    },
+    {
+      instructions:
+        "Inspect account and market state before staging an order. Staging never submits an order. execute_staged_order only creates a short-lived http://127.0.0.1 approval URL and never signs or submits. A separate local confirmation and runtime policy checks are mandatory before any live submission."
+    }
+  );
+
+  server.registerTool(
+    "get_account_status",
+    {
+      title: "Get account status",
+      description:
+        "Return configured wallet identity, operating mode, keychain readiness, emergency-stop state, and paper-gate progress. Never returns secrets.",
+      inputSchema: getAccountStatusInputSchema,
+      outputSchema: getAccountStatusOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(
+        getAccountStatusOutputSchema,
+        () => deps.getAccountStatus(input)
+      )
+  );
+
+  server.registerTool(
+    "get_portfolio",
+    {
+      title: "Get portfolio",
+      description:
+        "Return the configured Polymarket profile's public positions and PnL using decimal strings. Public balance may be unavailable.",
+      inputSchema: getPortfolioInputSchema,
+      outputSchema: getPortfolioOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(getPortfolioOutputSchema, () => deps.getPortfolio(input))
+  );
+
+  server.registerTool(
+    "scan_candidates",
+    {
+      title: "Scan candidate markets",
+      description:
+        "Scan only the allowed politics, economics, and technology categories and return candidate market metadata. This does not estimate edge or stage orders.",
+      inputSchema: scanCandidatesInputSchema,
+      outputSchema: scanCandidatesOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(scanCandidatesOutputSchema, () =>
+        deps.scanCandidates(input)
+      )
+  );
+
+  server.registerTool(
+    "get_market_snapshot",
+    {
+      title: "Get market snapshot",
+      description:
+        "Return current market rules, resolution source, order book, tick, fees, liquidity, and geoblock status for one market token or condition.",
+      inputSchema: getMarketSnapshotInputSchema,
+      outputSchema: getMarketSnapshotOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(getMarketSnapshotOutputSchema, () =>
+        deps.getMarketSnapshot(input)
+      )
+  );
+
+  server.registerTool(
+    "get_risk_status",
+    {
+      title: "Get risk status",
+      description:
+        "Return immutable pilot limits, current exposure, daily PnL, paper-gate state, cooldown, and active risk violations.",
+      inputSchema: getRiskStatusInputSchema,
+      outputSchema: getRiskStatusOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(getRiskStatusOutputSchema, () =>
+        deps.getRiskStatus(input)
+      )
+  );
+
+  server.registerTool(
+    "get_order_status",
+    {
+      title: "Get order status",
+      description:
+        "Return the latest locally validated ledger status, fills, and fees for exactly one proposal or CLOB order identifier.",
+      inputSchema: getOrderStatusInputSchema,
+      outputSchema: getOrderStatusOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(getOrderStatusOutputSchema, () =>
+        deps.getOrderStatus(input)
+      )
+  );
+
+  server.registerTool(
+    "stage_order",
+    {
+      title: "Stage order",
+      description:
+        "Validate policy and persist an immutable, expiring order proposal. This tool never signs or submits an order.",
+      inputSchema: stageOrderInputSchema,
+      outputSchema: stageOrderOutputSchema,
+      annotations: STAGE_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(stageOrderOutputSchema, () => deps.stageOrder(input))
+  );
+
+  server.registerTool(
+    "execute_staged_order",
+    {
+      title: "Request local order approval",
+      description:
+        "Create or return an idempotent, short-lived loopback approval URL for the exact proposal ID and hash. This tool never signs or submits an order.",
+      inputSchema: executeStagedOrderInputSchema,
+      outputSchema: executeStagedOrderOutputSchema,
+      annotations: APPROVAL_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(executeStagedOrderOutputSchema, () =>
+        deps.createApprovalRequest(input)
+      )
+  );
+
+  server.registerTool(
+    "cancel_order",
+    {
+      title: "Cancel order",
+      description:
+        "Request cancellation of exactly one open order resolved from a CLOB order ID or proposal ID. Terminal cancellation still requires reconciliation; repeated calls are safe.",
+      inputSchema: cancelOrderInputSchema,
+      outputSchema: cancelOrderOutputSchema,
+      annotations: EXTERNAL_SAFETY_ACTION_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(cancelOrderOutputSchema, () => deps.cancelOrder(input))
+  );
+
+  server.registerTool(
+    "emergency_stop",
+    {
+      title: "Emergency stop",
+      description:
+        "Persistently lock live execution and request cancellation of all known open orders. Requires the exact confirmation phrase CANCEL_ALL_AND_LOCK.",
+      inputSchema: emergencyStopInputSchema,
+      outputSchema: emergencyStopOutputSchema,
+      annotations: EXTERNAL_SAFETY_ACTION_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(emergencyStopOutputSchema, () =>
+        deps.emergencyStop(input)
+      )
+  );
+
+  return server;
+}
+
+async function invokeStructured<
+  Schema extends z.ZodType<Record<string, unknown>>
+>(
+  schema: Schema,
+  operation: () => Awaitable<z.input<Schema>>
+): Promise<CallToolResult> {
+  try {
+    const structuredContent = schema.parse(await operation());
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(structuredContent, null, 2)
+        }
+      ],
+      structuredContent
+    };
+  } catch (error) {
+    const publicError =
+      error instanceof PublicMcpToolError
+        ? {
+            code: error.code,
+            message: error.publicMessage
+          }
+        : {
+            code: "INTERNAL_TOOL_ERROR",
+            message:
+              "The operation failed safely. Inspect the local service logs for details."
+          };
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(publicError)
+        }
+      ],
+      isError: true
+    };
+  }
+}
+
+interface RuntimeFactoryModule {
+  createMcpToolDependencies?: () => Awaitable<McpToolDependencies>;
+}
+
+export async function main(): Promise<void> {
+  const runtimeModulePath = "../runtime.js";
+  const runtimeModule = (await import(runtimeModulePath)) as RuntimeFactoryModule;
+  if (typeof runtimeModule.createMcpToolDependencies !== "function") {
+    throw new Error(
+      "../runtime.js must export createMcpToolDependencies()."
+    );
+  }
+
+  const deps = await runtimeModule.createMcpToolDependencies();
+  const server = createMcpServer(deps);
+  const transport = new StdioServerTransport();
+  let closing = false;
+  let runtimeClosePromise: Promise<void> | null = null;
+
+  const closeRuntime = (): Promise<void> => {
+    runtimeClosePromise ??= Promise.resolve(deps.close?.());
+    return runtimeClosePromise;
+  };
+
+  const close = async (): Promise<void> => {
+    if (closing) {
+      return;
+    }
+    closing = true;
+    try {
+      await server.close();
+    } finally {
+      await closeRuntime();
+    }
+  };
+
+  // Protocol.connect preserves pre-installed transport hooks. This makes EOF,
+  // transport closure, and parse/I/O errors take the same fail-closed runtime
+  // shutdown path as SIGINT/SIGTERM.
+  transport.onclose = () => {
+    void closeRuntime();
+  };
+  transport.onerror = () => {
+    void close();
+  };
+  process.stdin.once("end", () => {
+    void close();
+  });
+  process.stdin.once("close", () => {
+    void close();
+  });
+
+  process.once("SIGINT", () => {
+    void close().finally(() => process.exit(0));
+  });
+  process.once("SIGTERM", () => {
+    void close().finally(() => process.exit(0));
+  });
+
+  await server.connect(transport);
+}
+
+const isDirectExecution =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isDirectExecution) {
+  void main().catch(() => {
+    process.stderr.write(
+      "[polymarket-mcp] Fatal startup error. Review the local runtime configuration.\n"
+    );
+    process.exitCode = 1;
+  });
+}
