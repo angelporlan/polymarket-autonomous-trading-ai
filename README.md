@@ -17,7 +17,7 @@ El servidor expone por `stdio` estas herramientas MCP:
 | `get_risk_status` | Límites inmutables, exposición, PnL diario y estado del piloto. |
 | `get_order_status` | Último estado, fills y fees validados y guardados en el ledger local. |
 | `stage_order` | Valida y persiste una propuesta inmutable; no firma ni envía. |
-| `execute_staged_order` | Devuelve la URL de segunda confirmación en `127.0.0.1`; no firma ni envía por sí misma. |
+| `execute_staged_order` | Ejecuta de forma autónoma una propuesta staged si cumple las reglas de riesgo, presupuesto de sesión y barreras live. |
 | `cancel_order` | Solicita cancelar una orden concreta; no declara el estado terminal sin conciliación. |
 | `emergency_stop` | Bloquea la operativa y solicita cancelar todas las órdenes conocidas. Exige `CANCEL_ALL_AND_LOCK`. |
 
@@ -26,24 +26,22 @@ No hay herramientas MCP para leer secretos, firmar mensajes arbitrarios, deposit
 ## Flujo de seguridad
 
 ```text
-Codex analiza
+Codex / Antigravity analiza la oportunidad y valida al menos 2 fuentes independientes
     ↓
-stage_order valida límites y crea propuesta + SHA-256 (caduca en 90 s)
+Se verifica sesión activa de trading con presupuesto pUSD autorizado
     ↓
-la persona aprueba el ID y hash exactos en Codex
+stage_order valida límites de riesgo y techos duros, y genera la propuesta inmutable + SHA-256
     ↓
-execute_staged_order devuelve una URL http://127.0.0.1:8787 que la persona abre
+execute_staged_order reclama la propuesta en una única transacción SQLite atómica, descuenta el presupuesto y valida el preflight
     ↓
-la persona revisa la orden, marca la confirmación y escribe los últimos 6 caracteres del hash
+Re-validación de geoblock, mercado, tick, negRisk, comisiones y hard ceilings
     ↓
-se repiten geoblock, mercado, tick, negRisk, precio, profundidad y límites
+Firmante restringido autoriza únicamente esa orden EIP-712 GTD
     ↓
-Keychain solicita presencia local y el firmante restringido autoriza solo esa orden EIP-712
-    ↓
-orden limitada GTD o bloqueo seguro
+PositionSupervisor monitoriza automáticamente posiciones abiertas (stop-loss 30 %, take-profit 50 %, 14 días máx)
 ```
 
-Cambiar mercado, outcome, precio, cantidad, reglas, exposición o hash invalida la aprobación. La aprobación local usa sesión de un solo uso, CSRF, comprobaciones estrictas de `Host` y `Origin`, política CSP y escucha únicamente en `127.0.0.1`.
+El servidor local en `127.0.0.1` funciona como un dashboard de solo lectura para monitorización (estado, posiciones, PnL, presupuesto y ledger). No expone acciones de aprobación ni firma manual.
 
 `POLYMARKET_LIVE_ENABLED=true` nunca basta para operar. La ejecución real también requiere activación persistida local, superar la fase paper, correspondencia entre signer/funder/perfil, credenciales protegidas, ausencia de parada de emergencia, propuesta vigente, confirmación local y preflight final satisfactorio. Una respuesta de geoblock bloqueada, desconocida o antigua impide el envío.
 
