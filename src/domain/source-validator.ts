@@ -16,7 +16,36 @@ const FORBIDDEN_DOMAINS = new Set([
   "localhost"
 ]);
 
+export function extractRegistrableDomain(hostname: string): string {
+  const host = hostname.toLowerCase();
+  const parts = host.split(".");
+  if (parts.length <= 2) return host;
+  const last2 = parts.slice(-2).join(".");
+  if (["co.uk", "gov.uk", "com.es", "org.uk", "europa.eu"].includes(last2)) {
+    return parts.slice(-3).join(".");
+  }
+  return parts.slice(-2).join(".");
+}
+
+const ALLOWED_ROOT_DOMAINS = new Set([
+  "reuters.com",
+  "apnews.com",
+  "bloomberg.com",
+  "ft.com",
+  "bbc.com",
+  "bbc.co.uk",
+  "nytimes.com",
+  "wsj.com",
+  "economist.com",
+  "lemonde.fr",
+  "elpais.com",
+  "boe.es",
+  "federalreserve.gov",
+  "ecb.europa.eu"
+]);
+
 export const MAX_SOURCE_AGE_MS = 7 * 24 * 60 * 60 * 1_000; // 7 days max age
+export const CRISIS_SOURCE_AGE_MS = 48 * 60 * 60 * 1_000; // 48 hours max age for breaking crisis
 
 export function validateEvidenceSources(
   sources: EvidenceSource[],
@@ -57,11 +86,21 @@ export function validateEvidenceSources(
       violations.push(`${label}: URL must use HTTP or HTTPS protocol.`);
     }
 
-    const domain = urlObj.hostname.toLowerCase();
-    if (FORBIDDEN_DOMAINS.has(domain) || domain.endsWith(".polymarket.com")) {
-      violations.push(`${label}: domain '${domain}' is forbidden or a Polymarket self-reference.`);
+    const host = urlObj.hostname.toLowerCase();
+    const rootDomain = extractRegistrableDomain(host);
+
+    if (FORBIDDEN_DOMAINS.has(host) || FORBIDDEN_DOMAINS.has(rootDomain) || host.endsWith(".polymarket.com")) {
+      violations.push(`${label}: domain '${host}' is forbidden or a Polymarket self-reference.`);
+    } else if (
+      !ALLOWED_ROOT_DOMAINS.has(rootDomain) &&
+      !rootDomain.endsWith(".gov") &&
+      !rootDomain.endsWith(".edu") &&
+      !rootDomain.endsWith(".eu") &&
+      !rootDomain.endsWith(".org")
+    ) {
+      violations.push(`${label}: domain '${host}' is not a recognized news or official primary source.`);
     } else {
-      validDomains.add(domain);
+      validDomains.add(rootDomain);
     }
 
     if (!source.title || typeof source.title !== "string" || source.title.trim().length < 10) {
@@ -75,10 +114,16 @@ export function validateEvidenceSources(
       if (Number.isNaN(pubMs)) {
         violations.push(`${label}: publishedAt '${source.publishedAt}' is not a valid ISO timestamp.`);
       } else if (pubMs > nowMs + 60_000) {
-        // 1 min clock skew grace period
         violations.push(`${label}: publishedAt cannot be in the future.`);
       } else if (nowMs - pubMs > MAX_SOURCE_AGE_MS) {
         violations.push(`${label}: publishedAt is older than 7 days.`);
+      }
+    }
+
+    if (source.retrievedAt && typeof source.retrievedAt === "string") {
+      const retMs = Date.parse(source.retrievedAt);
+      if (Number.isNaN(retMs) || retMs > nowMs + 60_000) {
+        violations.push(`${label}: retrievedAt must be a valid non-future ISO timestamp.`);
       }
     }
   }
