@@ -699,14 +699,10 @@ function validateFreshMarket(
   if (
     proposal.market.feeExponent === undefined ||
     proposal.market.feesTakerOnly === undefined ||
-    effectiveFeeRateBps < 0 ||
-    effectiveFeeRateBps > 10_000 ||
+    effectiveFeeRateBps !== proposal.market.feeRateBps ||
     refreshedFeeExponent !== proposal.market.feeExponent ||
     refreshedTakerOnly !== proposal.market.feesTakerOnly
   ) {
-    process.stderr.write(
-      `[fee-debug] effectiveFeeRateBps=${effectiveFeeRateBps} proposalFeeRateBps=${proposal.market.feeRateBps} refreshedFeeExponent=${refreshedFeeExponent} proposalFeeExponent=${proposal.market.feeExponent} refreshedTakerOnly=${refreshedTakerOnly} proposalTakerOnly=${proposal.market.feesTakerOnly}\n`
-    );
     throw new SafeExternalServiceError(
       "The market fee parameters changed after approval.",
       {
