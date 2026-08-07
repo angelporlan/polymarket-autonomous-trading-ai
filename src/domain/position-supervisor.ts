@@ -26,7 +26,10 @@ export function evaluatePositionExitPolicy(
   const recommendedOrderSide: OrderSide = position.side === "BUY" ? "SELL" : "BUY";
 
   // Check 0: Legacy unverified position
-  if (position.exitState === "LEGACY_UNVERIFIED") {
+  if (
+    position.exitState === "LEGACY_UNVERIFIED" ||
+    position.evidenceQuality === "LEGACY_UNVERIFIED"
+  ) {
     return {
       shouldExit: false,
       triggerReason: "LEGACY_UNVERIFIED",
@@ -75,7 +78,10 @@ export function evaluatePositionExitPolicy(
   }
 
   // Check 5: Max duration (14 days)
-  if (nowMs - position.openedAtMs >= MAX_HOLDING_DURATION_MS) {
+  if (
+    position.openedAtMs !== null &&
+    nowMs - position.openedAtMs >= MAX_HOLDING_DURATION_MS
+  ) {
     return {
       shouldExit: true,
       triggerReason: "MAX_DURATION_EXPIRED",
@@ -94,6 +100,15 @@ export function evaluatePositionExitPolicy(
       shouldExit: false,
       triggerReason: "RESEARCH_REQUIRED",
       explanation: "Market price moved by at least 20%; a fresh research bundle is required before evaluating edge.",
+      recommendedOrderSide
+    };
+  }
+
+  if (position.evidenceQuality === "PARTIALLY_VERIFIED") {
+    return {
+      shouldExit: false,
+      triggerReason: "HOLDING",
+      explanation: "Only the position price history is verified; edge-based exit remains blocked.",
       recommendedOrderSide
     };
   }

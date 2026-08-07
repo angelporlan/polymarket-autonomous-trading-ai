@@ -18,7 +18,8 @@ import {
   type OrderProposal,
   type PaperTrade,
   type PortfolioSnapshot,
-  type ResearchBundle
+  type ResearchBundle,
+  type LegacyImportReport
 } from "./domain/types.js";
 import type { TradingSession } from "./domain/session.js";
 import {
@@ -58,7 +59,9 @@ import type {
   PrepareResearchBundleInput,
   PrepareResearchBundleOutput,
   SupervisePositionsInput,
-  SupervisePositionsOutput
+  SupervisePositionsOutput,
+  ImportLegacyPositionInput,
+  ImportLegacyPositionOutput
 } from "./mcp/schemas.js";
 import { GuardedLiveTradingAdapter } from "./polymarket/live-adapter.js";
 import { PolygonReceiptVerifier } from "./polymarket/onchain-verifier.js";
@@ -515,6 +518,14 @@ export class PolymarketRuntime {
     };
   }
 
+  async importLegacyPosition(
+    input: ImportLegacyPositionInput
+  ): Promise<ImportLegacyPositionOutput> {
+    this.requireProfile();
+    const result = await this.service.importLegacyPosition(input.tokenId);
+    return legacyImportOutput(result.report, result.imported);
+  }
+
   /**
    * Narrow entry point for the detached risk-reduction daemon. It deliberately
    * has no session creation, entry staging, or arbitrary signing capability.
@@ -919,6 +930,8 @@ export async function createMcpToolDependencies(): Promise<McpToolDependencies> 
       guarded(() => runtime.endTradingSession(input)),
     supervisePositions: (input) =>
       guarded(() => runtime.supervisePositions(input)),
+    importLegacyPosition: (input) =>
+      guarded(() => runtime.importLegacyPosition(input)),
     stageOrder: (input) => guarded(() => runtime.stageOrder(input)),
     executeStagedOrder: (input) =>
       guarded(() => runtime.executeStagedOrder(input)),
@@ -1139,6 +1152,37 @@ function researchBundleOutput(
     rationale: bundle.rationale,
     counterRationale: bundle.counterRationale,
     contentHash: bundle.contentHash
+  };
+}
+
+function legacyImportOutput(
+  report: LegacyImportReport,
+  imported: boolean
+): ImportLegacyPositionOutput {
+  return {
+    reportId: report.id,
+    imported,
+    tokenId: report.tokenId,
+    conditionId: report.conditionId,
+    quality: report.quality,
+    automaticExitPolicy: report.automaticExitPolicy,
+    shares: formatMicros(report.sharesMicros),
+    averageEntryPricePusd: formatMicros(report.averagePriceMicros),
+    openedAt:
+      report.openedAtMs === null
+        ? null
+        : new Date(report.openedAtMs).toISOString(),
+    feesPusd:
+      report.feesMicros === null ? null : formatMicros(report.feesMicros),
+    activityFillCount: report.activityFillCount,
+    localEvidenceCount: report.localEvidenceCount,
+    reconciledOrderCount: report.reconciledOrderCount,
+    reconciledFillCount: report.reconciledFillCount,
+    remoteOpenOrderCount: report.remoteOpenOrderCount,
+    ordersChecked: report.ordersChecked,
+    transactionHashes: report.transactionHashes,
+    importedAt: new Date(report.importedAtMs).toISOString(),
+    message: report.message
   };
 }
 

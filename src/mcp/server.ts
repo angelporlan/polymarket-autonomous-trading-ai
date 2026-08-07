@@ -40,6 +40,8 @@ import {
   prepareResearchBundleOutputSchema,
   supervisePositionsInputSchema,
   supervisePositionsOutputSchema,
+  importLegacyPositionInputSchema,
+  importLegacyPositionOutputSchema,
   type CancelOrderInput,
   type CancelOrderOutput,
   type EmergencyStopInput,
@@ -71,7 +73,9 @@ import {
   type PrepareResearchBundleInput,
   type PrepareResearchBundleOutput,
   type SupervisePositionsInput,
-  type SupervisePositionsOutput
+  type SupervisePositionsOutput,
+  type ImportLegacyPositionInput,
+  type ImportLegacyPositionOutput
 } from "./schemas.js";
 
 export type Awaitable<T> = T | Promise<T>;
@@ -106,6 +110,9 @@ export interface McpToolDependencies {
   supervisePositions(
     input: SupervisePositionsInput
   ): Awaitable<SupervisePositionsOutput>;
+  importLegacyPosition(
+    input: ImportLegacyPositionInput
+  ): Awaitable<ImportLegacyPositionOutput>;
   stageOrder(input: StageOrderInput): Awaitable<StageOrderOutput>;
   executeStagedOrder(
     input: ExecuteStagedOrderInput
@@ -344,6 +351,22 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
     (input) =>
       invokeStructured(supervisePositionsOutputSchema, () =>
         deps.supervisePositions(input)
+      )
+  );
+
+  server.registerTool(
+    "import_legacy_position",
+    {
+      title: "Import legacy position",
+      description:
+        "Reconstruct one existing position from public activity, the local ledger, and reconciled fills. Imports never invent entry evidence; incomplete histories remain blocked or price-only.",
+      inputSchema: importLegacyPositionInputSchema,
+      outputSchema: importLegacyPositionOutputSchema,
+      annotations: STAGE_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(importLegacyPositionOutputSchema, () =>
+        deps.importLegacyPosition(input)
       )
   );
 

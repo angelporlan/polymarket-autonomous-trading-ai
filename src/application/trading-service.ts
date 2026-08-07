@@ -19,6 +19,7 @@ import {
   PUSD_SCALE,
   type ExitReason,
   type ExitState,
+  type LegacyImportReport,
   type MarketSnapshot,
   type OrderIntent,
   type OrderProposal,
@@ -41,6 +42,12 @@ import {
   evaluatePositionExitPolicy,
   type EvaluationAction
 } from "../domain/position-supervisor.js";
+import {
+  computeLegacyImport,
+  type LegacyImportResult,
+  type LegacyLocalEvidence,
+  type LegacyLocalFill
+} from "../domain/legacy-import.js";
 import { PaperSimulator } from "../paper/simulator.js";
 import { zonedDayStartMs } from "./risk-context.js";
 import {
@@ -157,6 +164,99 @@ export class TradingService {
 
   getPortfolio() {
     return this.options.marketData.getPortfolio(this.options.profileAddress);
+  }
+
+  async importLegacyPosition(tokenId: string): Promise<LegacyImportResult> {
+    const portfolio = await this.getPortfolio();
+    const position = portfolio.positions.find(
+      (candidate) => candidate.tokenId === tokenId
+    );
+    if (position === undefined || position.sizeMicros <= 0n) {
+      throw new Error("LEGACY_POSITION_NOT_FOUND");
+    }
+
+    const existing = this.options.database.getPositionRecord(tokenId);
+    if (existing !== null) {
+      const stored = this.options.database.getLatestLegacyImportReport(tokenId);
+      return {
+        imported: false,
+        report: stored ?? existingPositionReport(existing, this.now())
+      };
+    }
+
+    let activity: UserTradeActivity[] = [];
+    let activityAvailable = true;
+    try {
+      activity = await this.options.marketData.getUserActivity(
+        this.options.profileAddress,
+        0
+      );
+    } catch {
+      activityAvailable = false;
+    }
+
+    const local = this.collectLegacyLocalEvidence(tokenId);
+    let ordersChecked = false;
+    let remoteOpenOrderCount = 0;
+    if (
+      this.options.liveEnvironmentEnabled &&
+      this.options.liveTrading !== null
+    ) {
+      try {
+        const openOrders = await this.options.liveTrading.getOpenOrders();
+        ordersChecked = true;
+        remoteOpenOrderCount = openOrders.filter(
+          (order) => readStringValue(order.assetId, order.asset_id) === tokenId
+        ).length;
+      } catch {
+        // Missing authenticated order evidence lowers the quality instead of
+        // being converted into a permissive import.
+      }
+    }
+
+    const computation = computeLegacyImport({
+      position,
+      activity,
+      activityAvailable,
+      local,
+      remoteOpenOrderCount,
+      ordersChecked
+    });
+    const importedAtMs = this.now();
+    const report: LegacyImportReport = {
+      id: randomUUID(),
+      tokenId: position.tokenId,
+      conditionId: position.conditionId,
+      importedAtMs,
+      ...computation
+    };
+    const positionRecord: PositionRecord = {
+      tokenId: position.tokenId,
+      conditionId: position.conditionId,
+      question: position.question,
+      outcome: position.outcome,
+      side: "BUY",
+      sharesMicros: position.sizeMicros,
+      averagePriceMicros: position.averagePriceMicros,
+      evidenceQuality: computation.quality,
+      entryProbabilityMicros: null,
+      entryEdgeMicros: null,
+      openedAtMs: computation.openedAtMs,
+      lastEvaluatedAtMs: importedAtMs,
+      lastMarketPriceMicros: position.currentPriceMicros,
+      lastEstimatedProbabilityMicros: null,
+      lastResearchBundleId: null,
+      sourcesJson: "[]",
+      exitState:
+        computation.quality === "LEGACY_UNVERIFIED"
+          ? "LEGACY_UNVERIFIED"
+          : "HOLDING",
+      activeExitProposalId: null,
+      activeExitOrderId: null
+    };
+    this.options.database.saveLegacyImportReport(report);
+    this.options.database.savePositionRecord(positionRecord, importedAtMs);
+    return { imported: true, report };
   }
 
   scanCandidates() {
@@ -640,6 +740,7 @@ export class TradingService {
           side: "BUY",
           sharesMicros: p.sizeMicros,
           averagePriceMicros: p.averagePriceMicros,
+          evidenceQuality: "LEGACY_UNVERIFIED",
           entryProbabilityMicros: null,
           entryEdgeMicros: null,
           openedAtMs: nowMs,
@@ -1048,6 +1149,81 @@ export class TradingService {
       false
     );
     return monitored.length > 0 || openOrdersById.size > 0;
+  }
+
+  private collectLegacyLocalEvidence(tokenId: string): LegacyLocalEvidence {
+    const proposals = this.options.database
+      .listProposals()
+      .filter((proposal) => proposal.market.tokenId === tokenId);
+    const fills: LegacyLocalFill[] = [];
+    const transactionHashes: string[] = [];
+    let reconciledOrderCount = 0;
+    let feesMicros = 0n;
+    let feesKnown = true;
+    let feeEvidenceCount = 0;
+
+    for (const proposal of proposals) {
+      const execution = this.options.database.getExecution(proposal.id);
+      if (execution === null || execution.status.toUpperCase() !== "CONFIRMED") {
+        continue;
+      }
+      reconciledOrderCount += 1;
+      const response = parseLegacyExecutionResponse(execution.responseJson);
+      const onchain = readRecordValue(response.onchain);
+      const fee = onchain?.feeMicros;
+      if (typeof fee === "bigint" && fee >= 0n) {
+        feesMicros += fee;
+        feeEvidenceCount += 1;
+      } else {
+        feesKnown = false;
+      }
+      for (const rawFill of readRecordArrayValue(response.attributedTrades)) {
+        if (rawFill.status !== "CONFIRMED") {
+          continue;
+        }
+        const sharesMicros = rawFill.sharesMicros;
+        const priceMicros = rawFill.priceMicros;
+        const timestampMs = rawFill.matchTimeMs;
+        if (
+          typeof sharesMicros !== "bigint" ||
+          sharesMicros <= 0n ||
+          typeof priceMicros !== "bigint" ||
+          priceMicros <= 0n ||
+          priceMicros > PUSD_SCALE ||
+          typeof timestampMs !== "number" ||
+          !Number.isSafeInteger(timestampMs) ||
+          timestampMs <= 0
+        ) {
+          continue;
+        }
+        const transactionHash =
+          typeof rawFill.transactionHash === "string" &&
+          /^0x[a-fA-F0-9]{64}$/u.test(rawFill.transactionHash)
+            ? rawFill.transactionHash.toLowerCase()
+            : null;
+        if (transactionHash !== null) {
+          transactionHashes.push(transactionHash);
+        }
+        fills.push({
+          side: proposal.side,
+          sharesMicros,
+          priceMicros,
+          timestampMs,
+          transactionHash
+        });
+      }
+    }
+
+    return {
+      orderCount: proposals.length,
+      reconciledOrderCount,
+      fills,
+      feesMicros:
+        feesKnown && feeEvidenceCount === reconciledOrderCount
+          ? feesMicros
+          : null,
+      transactionHashes
+    };
   }
 
   private async reconcileRemoteExecution(
@@ -2121,6 +2297,78 @@ function parseExecutionResponse(
   } catch {
     throw new Error("EXECUTION_RESPONSE_LEDGER_INVALID");
   }
+}
+
+function parseLegacyExecutionResponse(
+  responseJson: string
+): Record<string, unknown> {
+  if (responseJson.length > 1_000_000) {
+    return {};
+  }
+  try {
+    const parsed = parseWithBigInts<unknown>(responseJson);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function readRecordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readRecordArrayValue(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(
+    (candidate): candidate is Record<string, unknown> =>
+      candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)
+  );
+}
+
+function readStringValue(...values: unknown[]): string | null {
+  const value = values.find(
+    (candidate): candidate is string =>
+      typeof candidate === "string" && candidate.trim().length > 0
+  );
+  return value ?? null;
+}
+
+function existingPositionReport(
+  position: PositionRecord,
+  nowMs: number
+): LegacyImportReport {
+  const automaticExitPolicy =
+    position.evidenceQuality === "VERIFIED"
+      ? "FULL"
+      : position.evidenceQuality === "PARTIALLY_VERIFIED"
+        ? "PRICE_ONLY"
+        : "BLOCKED";
+  return {
+    id: randomUUID(),
+    tokenId: position.tokenId,
+    conditionId: position.conditionId,
+    quality: position.evidenceQuality,
+    automaticExitPolicy,
+    importedAtMs: nowMs,
+    sharesMicros: position.sharesMicros,
+    averagePriceMicros: position.averagePriceMicros,
+    openedAtMs: position.openedAtMs,
+    feesMicros: null,
+    activityFillCount: 0,
+    localEvidenceCount: 0,
+    reconciledOrderCount: 0,
+    reconciledFillCount: 0,
+    remoteOpenOrderCount: 0,
+    ordersChecked: false,
+    transactionHashes: [],
+    message: "Position already has a local record; no import was performed."
+  };
 }
 
 function readRequiredRemoteString(

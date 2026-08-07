@@ -738,6 +738,17 @@ Reglas:
 - [ ] Emitir un informe de importación.
 - [ ] Tras la importación, aplicar la política correspondiente a la calidad de evidencia.
 
+## Evidencia de implementación
+
+- [x] `import_legacy_position` consulta la cartera pública y toda la actividad pública disponible para el token y mercado solicitados.
+- [x] Contrasta propuestas y ejecuciones locales confirmadas, fills atribuidos, fees y hashes; en live intenta revisar también las órdenes abiertas autenticadas.
+- [x] Persiste un informe inmutable en `legacy_import_reports` y un `PositionRecord` con `evidenceQuality`; una repetición no duplica la importación.
+- [x] `VERIFIED` habilita la política completa, `PARTIALLY_VERIFIED` limita la salida a precio/duración y `LEGACY_UNVERIFIED` bloquea toda venta automática.
+- [x] No se inventan fechas, edge, fuentes ni fees: los campos desconocidos quedan en `null` o provocan calidad bloqueada.
+- [x] Verificación: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `253` tests); `test/legacy-import.test.ts` cubre las tres calidades e idempotencia.
+
+La posición concreta de Macron sigue pendiente de identificar el `tokenId` y consultar sus datos públicos reales; el código queda preparado para importarla sin rellenar evidencia faltante.
+
 ---
 
 # P9 — Eliminar arquitectura heredada

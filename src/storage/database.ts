@@ -10,7 +10,8 @@ import type {
   PaperTrade,
   PositionRecord,
   ProposalStatus,
-  ResearchBundle
+  ResearchBundle,
+  LegacyImportReport
 } from "../domain/types.js";
 import {
   createTradingSession,
@@ -1559,6 +1560,40 @@ export class TradingDatabase {
     );
   }
 
+  saveLegacyImportReport(report: LegacyImportReport): void {
+    this.db
+      .prepare(
+        `INSERT INTO legacy_import_reports
+          (id, token_id, condition_id, quality, imported_at_ms, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        report.id,
+        report.tokenId,
+        report.conditionId,
+        report.quality,
+        report.importedAtMs,
+        stringifyWithBigInts(report)
+      );
+    this.appendAudit("LEGACY_POSITION_IMPORTED", report.tokenId, {
+      reportId: report.id,
+      conditionId: report.conditionId,
+      quality: report.quality,
+      automaticExitPolicy: report.automaticExitPolicy,
+      transactionHashCount: report.transactionHashes.length
+    });
+  }
+
+  getLatestLegacyImportReport(tokenId: string): LegacyImportReport | null {
+    const row = this.db
+      .prepare(
+        `SELECT payload_json FROM legacy_import_reports
+         WHERE token_id = ? ORDER BY imported_at_ms DESC LIMIT 1`
+      )
+      .get(tokenId) as ProposalRow | undefined;
+    return row ? parseWithBigInts<LegacyImportReport>(row.payload_json) : null;
+  }
+
   getReservedExitShares(tokenId: string, nowMs = Date.now()): bigint {
     const rows = this.db
       .prepare(
@@ -1962,6 +1997,15 @@ export class TradingDatabase {
         payload_json TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS legacy_import_reports (
+        id TEXT PRIMARY KEY,
+        token_id TEXT NOT NULL,
+        condition_id TEXT NOT NULL,
+        quality TEXT NOT NULL,
+        imported_at_ms INTEGER NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS exit_reservations (
         proposal_id TEXT PRIMARY KEY REFERENCES proposals(id),
         token_id TEXT NOT NULL,
@@ -1978,6 +2022,8 @@ export class TradingDatabase {
         ON exit_reservations(token_id);
       CREATE INDEX IF NOT EXISTS idx_research_bundles_market
         ON research_bundles(market_condition_id, token_id, expires_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_legacy_import_reports_token
+        ON legacy_import_reports(token_id, imported_at_ms);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_clob_order_id
         ON executions(clob_order_id)
         WHERE clob_order_id IS NOT NULL;
@@ -1994,7 +2040,9 @@ function normalizePositionRecord(value: Record<string, unknown>): PositionRecord
   const record = withoutLegacyProbability as Partial<PositionRecord>;
   return {
     ...(record as PositionRecord),
+    evidenceQuality: record.evidenceQuality ?? "LEGACY_UNVERIFIED",
     entryProbabilityMicros: record.entryProbabilityMicros ?? null,
+    openedAtMs: record.openedAtMs ?? null,
     entryEdgeMicros: record.entryEdgeMicros ?? null,
     lastMarketPriceMicros:
       record.lastMarketPriceMicros ??

@@ -199,6 +199,13 @@ export type ExitState =
   | "CLOSING"
   | "CLOSED";
 
+export type LegacyEvidenceQuality =
+  | "VERIFIED"
+  | "PARTIALLY_VERIFIED"
+  | "LEGACY_UNVERIFIED";
+
+export type LegacyAutoExitPolicy = "FULL" | "PRICE_ONLY" | "BLOCKED";
+
 export interface PositionRecord {
   tokenId: string;
   conditionId: string;
@@ -207,9 +214,10 @@ export interface PositionRecord {
   side: OrderSide;
   sharesMicros: bigint;
   averagePriceMicros: bigint;
+  evidenceQuality: LegacyEvidenceQuality;
   entryProbabilityMicros: bigint | null;
   entryEdgeMicros: bigint | null;
-  openedAtMs: number;
+  openedAtMs: number | null;
   lastEvaluatedAtMs: number;
   lastMarketPriceMicros: bigint;
   lastEstimatedProbabilityMicros: bigint | null;
@@ -218,6 +226,27 @@ export interface PositionRecord {
   exitState: ExitState;
   activeExitProposalId: string | null;
   activeExitOrderId: string | null;
+}
+
+export interface LegacyImportReport {
+  id: string;
+  tokenId: string;
+  conditionId: string;
+  quality: LegacyEvidenceQuality;
+  automaticExitPolicy: LegacyAutoExitPolicy;
+  importedAtMs: number;
+  sharesMicros: bigint;
+  averagePriceMicros: bigint;
+  openedAtMs: number | null;
+  feesMicros: bigint | null;
+  activityFillCount: number;
+  localEvidenceCount: number;
+  reconciledOrderCount: number;
+  reconciledFillCount: number;
+  remoteOpenOrderCount: number;
+  ordersChecked: boolean;
+  transactionHashes: string[];
+  message: string;
 }
 
 export interface LocalApproval {

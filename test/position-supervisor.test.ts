@@ -14,6 +14,7 @@ describe("PositionSupervisor", () => {
     side: "BUY",
     sharesMicros: 100n * PUSD_SCALE,
     averagePriceMicros: 500_000n, // $0.50 entry
+    evidenceQuality: "VERIFIED",
     entryProbabilityMicros: 550_000n,
     entryEdgeMicros: 50_000n,
     openedAtMs: nowMs - 2 * 86400 * 1000, // 2 days ago
@@ -108,6 +109,25 @@ describe("PositionSupervisor", () => {
 
     expect(action.shouldExit).toBe(true);
     expect(action.triggerReason).toBe("EDGE_DISAPPEARED");
+  });
+
+  it("blocks edge exits for partially verified legacy positions", () => {
+    const action = evaluatePositionExitPolicy(
+      {
+        ...basePosition,
+        evidenceQuality: "PARTIALLY_VERIFIED",
+        lastMarketPriceMicros: 600_000n
+      },
+      600_000n,
+      580_000n,
+      "bundle-current",
+      futureEndMs,
+      nowMs
+    );
+
+    expect(action.shouldExit).toBe(false);
+    expect(action.triggerReason).toBe("HOLDING");
+    expect(action.explanation).toContain("edge-based exit remains blocked");
   });
 
   it("requires a fresh research bundle for edge exits and never treats price as probability", () => {

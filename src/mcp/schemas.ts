@@ -633,6 +633,38 @@ export const supervisePositionsOutputSchema = z
   })
   .strict();
 
+export const importLegacyPositionInputSchema = z
+  .object({
+    tokenId: identifierSchema
+  })
+  .strict();
+
+export const importLegacyPositionOutputSchema = z
+  .object({
+    reportId: proposalIdSchema,
+    imported: z.boolean(),
+    tokenId: identifierSchema,
+    conditionId: identifierSchema,
+    quality: z.enum(["VERIFIED", "PARTIALLY_VERIFIED", "LEGACY_UNVERIFIED"]),
+    automaticExitPolicy: z.enum(["FULL", "PRICE_ONLY", "BLOCKED"]),
+    shares: nonNegativeDecimalSchema,
+    averageEntryPricePusd: nonNegativeDecimalSchema,
+    openedAt: timestampSchema.nullable(),
+    feesPusd: nonNegativeDecimalSchema.nullable(),
+    activityFillCount: z.number().int().nonnegative(),
+    localEvidenceCount: z.number().int().nonnegative(),
+    reconciledOrderCount: z.number().int().nonnegative(),
+    reconciledFillCount: z.number().int().nonnegative(),
+    remoteOpenOrderCount: z.number().int().nonnegative(),
+    ordersChecked: z.boolean(),
+    transactionHashes: z
+      .array(z.string().regex(/^0x[a-fA-F0-9]{64}$/u))
+      .max(1000),
+    importedAt: timestampSchema,
+    message: z.string().trim().min(1)
+  })
+  .strict();
+
 export type GetAccountStatusInput = z.infer<typeof getAccountStatusInputSchema>;
 export type GetAccountStatusOutput = z.infer<typeof getAccountStatusOutputSchema>;
 export type GetPortfolioInput = z.infer<typeof getPortfolioInputSchema>;
@@ -677,3 +709,5 @@ export type EndTradingSessionInput = z.infer<typeof endTradingSessionInputSchema
 export type EndTradingSessionOutput = z.infer<typeof endTradingSessionOutputSchema>;
 export type SupervisePositionsInput = z.infer<typeof supervisePositionsInputSchema>;
 export type SupervisePositionsOutput = z.infer<typeof supervisePositionsOutputSchema>;
+export type ImportLegacyPositionInput = z.infer<typeof importLegacyPositionInputSchema>;
+export type ImportLegacyPositionOutput = z.infer<typeof importLegacyPositionOutputSchema>;

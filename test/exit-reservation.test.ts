@@ -119,6 +119,7 @@ describe("live EXIT reservations", () => {
       side: "BUY",
       sharesMicros: 2n * PUSD_SCALE,
       averagePriceMicros: 500_000n,
+      evidenceQuality: "VERIFIED",
       entryProbabilityMicros: 550_000n,
       entryEdgeMicros: 50_000n,
       openedAtMs: NOW_MS - 2 * 24 * 60 * 60_000,
