@@ -11,13 +11,26 @@ import {
 import {
   canonicalCorrelationKey,
   formatMicros,
+  multiplyMicros,
   parseDecimalToMicros,
   type MarketSnapshot,
   type OrderIntent,
   type OrderProposal,
+  type PositionRecord,
   type PortfolioSnapshot,
   type UserTradeActivity
 } from "../domain/types.js";
+import { validateEvidenceSources } from "../domain/source-validator.js";
+import {
+  createTradingSession,
+  isSessionValid,
+  type CreateSessionInput,
+  type TradingSession
+} from "../domain/session.js";
+import {
+  evaluatePositionExitPolicy,
+  type EvaluationAction
+} from "../domain/position-supervisor.js";
 import { PaperSimulator } from "../paper/simulator.js";
 import { zonedDayStartMs } from "./risk-context.js";
 import {
@@ -173,19 +186,59 @@ export class TradingService {
     return { proposal, execution, remote };
   }
 
+  startTradingSession(input: CreateSessionInput): TradingSession {
+    const session = createTradingSession({ ...input, nowMs: this.now() });
+    this.options.database.saveTradingSession(session);
+    return session;
+  }
+
+  getActiveTradingSession(executionMode: "live" | "paper"): TradingSession | null {
+    return this.options.database.getActiveTradingSession(executionMode, this.now());
+  }
+
   async stageOrder(input: StageOrderInput): Promise<StageOrderResult> {
-    requireResearchFields(input);
-    if (input.executionMode === "paper") {
-      // Force a fresh, externally valued checkpoint before evaluating the
-      // next simulated order. This makes the paper daily stop and exposure
-      // history depend on reconciled data rather than caller-supplied PnL.
-      await this.options.paperGate.metrics();
+    requireResearchFields(input, this.now());
+
+    const activeSession = this.options.database.getActiveTradingSession(input.executionMode, this.now());
+    if (!activeSession) {
+      throw new ProposalRejectedError([
+        {
+          code: "SESSION_INACTIVE",
+          message: `No active authorized trading session for mode '${input.executionMode}'. An authorized trading session with a pUSD budget must be configured before staging orders.`
+        }
+      ]);
     }
+
     const sharesMicros = parseDecimalToMicros(input.shares);
     const limitPriceMicros = parseDecimalToMicros(input.limitPrice);
     const estimatedProbabilityMicros = parseDecimalToMicros(
       input.estimatedProbability
     );
+    const orderCostMicros = multiplyMicros(limitPriceMicros, sharesMicros);
+
+    const sessionCheck = isSessionValid(activeSession, orderCostMicros, this.now());
+    if (!sessionCheck.valid) {
+      throw new ProposalRejectedError([
+        {
+          code: "SESSION_BUDGET_EXCEEDED",
+          message: sessionCheck.reason ?? "Insufficient session budget."
+        }
+      ]);
+    }
+
+    if (input.executionMode === "live") {
+      const status = await this.getAccountStatus();
+      if (status.mode !== "live_ready") {
+        throw new Error(
+          "LIVE_AUTONOMY_NOT_READY: Live mode is currently locked or unconfigured. Verify live environment flag, paper gate, signer, and active session budget."
+        );
+      }
+    }
+
+    if (input.executionMode === "paper") {
+      await this.options.paperGate.metrics();
+    }
+
     const snapshot = await this.options.marketData.getMarketSnapshot({
       conditionId: input.conditionId,
       tokenId: input.tokenId,
@@ -302,23 +355,133 @@ export class TradingService {
       throw new Error("The exact live proposal is missing, changed, or expired.");
     }
 
-    this.options.database.recordLocalApproval({
-      proposalId,
-      proposalHash,
-      approvedAtMs: nowMs,
-      expiresAtMs: proposal.expiresAtMs,
-      nonceHash: createHash("sha256").update(proposalHash).digest("hex"),
-      consumedAtMs: null
-    });
-    this.options.database.transitionProposal(
-      proposalId,
-      proposal.status,
-      "LOCALLY_APPROVED",
-      nowMs
-    );
+    const activeSession = this.options.database.getActiveTradingSession("live", nowMs);
+    if (!activeSession) {
+      throw new Error("LIVE_AUTONOMY_NOT_READY: No active authorized live trading session found.");
+    }
 
-    const approvedProposal = this.options.database.getProposal(proposalId)!;
-    return this.executeLocallyApproved(approvedProposal);
+    try {
+      await this.assertLiveGates();
+      await this.revalidateProposal(proposal);
+
+      const claimed = this.options.database.claimAutonomousExecution(
+        proposal.id,
+        proposal.hash,
+        activeSession.id,
+        nowMs
+      );
+
+      if (!claimed) {
+        return { accepted: false, message: "Execution claim failed or session budget exceeded." };
+      }
+
+      const liveTrading = this.options.liveTrading;
+      if (!liveTrading) {
+        throw new Error("Live trading adapter is not configured.");
+      }
+
+      const result = await liveTrading.submitGtd(proposal, async () => {
+        await this.assertLiveGates();
+        await this.revalidateProposal(proposal);
+      });
+
+      if (
+        result.orderId === null ||
+        result.orderId.trim().length === 0 ||
+        result.orderId.length > 512
+      ) {
+        throw new Error("CLOB_ORDER_ID_MISSING");
+      }
+
+      this.options.database.markExecutionSubmitted({
+        proposalId: proposal.id,
+        proposalHash: proposal.hash,
+        clobOrderId: result.orderId,
+        status: "SUBMITTED_UNRECONCILED",
+        submittedAtMs: this.now(),
+        responseJson: stringifyWithBigInts(result.response)
+      });
+
+      await liveTrading.startHeartbeat();
+      return {
+        accepted: true,
+        message: result.orderId
+          ? `Polymarket order ${result.orderId} was submitted with status ${result.status}.`
+          : `Polymarket accepted the request with status ${result.status}.`
+      };
+    } catch (error) {
+      this.options.database.markExecutionFailed(proposal.id, proposal.hash);
+      this.options.database.setEmergencyStop(
+        true,
+        safeErrorCode(error),
+        this.now()
+      );
+      if (this.options.liveTrading) {
+        try {
+          await withTimeout(
+            this.options.liveTrading.cancelAll(),
+            10_000,
+            "CANCEL_ALL_TIMEOUT"
+          );
+        } catch {}
+        try {
+          await this.options.liveTrading.stopHeartbeat();
+        } catch {}
+      }
+      return {
+        accepted: false,
+        message: "Execution failed safely; the emergency lock is active."
+      };
+    }
+  }
+
+  async supervisePositions(): Promise<Array<{ position: PositionRecord; action: EvaluationAction }>> {
+    const portfolio = await this.getPortfolio();
+    const results: Array<{ position: PositionRecord; action: EvaluationAction }> = [];
+    const nowMs = this.now();
+
+    for (const p of portfolio.positions) {
+      let rec = this.options.database.getPositionRecord(p.tokenId);
+      if (!rec) {
+        rec = {
+          tokenId: p.tokenId,
+          conditionId: p.conditionId,
+          question: p.question,
+          outcome: p.outcome,
+          side: "BUY",
+          sharesMicros: p.sizeMicros,
+          averagePriceMicros: p.averagePriceMicros,
+          entryEdgeMicros: 50_000n,
+          openedAtMs: nowMs,
+          lastEvaluatedAtMs: nowMs,
+          lastProbabilityMicros: p.currentPriceMicros,
+          sourcesJson: "[]",
+          exitState: "HOLDING"
+        };
+      }
+
+      const action = evaluatePositionExitPolicy(
+        rec,
+        p.currentPriceMicros,
+        p.currentPriceMicros,
+        p.endTimeMs,
+        nowMs
+      );
+
+      rec = {
+        ...rec,
+        sharesMicros: p.sizeMicros,
+        averagePriceMicros: p.averagePriceMicros,
+        lastEvaluatedAtMs: nowMs,
+        lastProbabilityMicros: p.currentPriceMicros,
+        exitState: action.triggerReason
+      };
+
+      this.options.database.savePositionRecord(rec, nowMs);
+      results.push({ position: rec, action });
+    }
+
+    return results;
   }
 
   async executeLocallyApproved(
@@ -909,12 +1072,18 @@ async function withTimeout<T>(
   }
 }
 
-function requireResearchFields(input: StageOrderInput): void {
+function requireResearchFields(input: StageOrderInput, nowMs = Date.now()): void {
   if (input.thesis.trim().length < 20 || input.counterThesis.trim().length < 20) {
     throw new Error("Thesis and counter-thesis must each contain at least 20 characters.");
   }
-  if (input.sources.length === 0 || !input.sources.some((source) => source.primary)) {
-    throw new Error("At least one public primary source is required.");
+  const validation = validateEvidenceSources(input.sources, nowMs);
+  if (!validation.valid) {
+    throw new ProposalRejectedError([
+      {
+        code: "SOURCE_VALIDATION_FAILED",
+        message: `Source validation failed: ${validation.violations.join("; ")}`
+      }
+    ]);
   }
 }
 
