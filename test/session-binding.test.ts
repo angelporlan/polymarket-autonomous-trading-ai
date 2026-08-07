@@ -109,7 +109,7 @@ describe("autonomous proposal/session binding", () => {
       ...riskContextFixture(NOW_MS),
       heldSharesMicros: 2n * PUSD_SCALE
     });
-    database.stageProposal(proposal);
+    database.stageProposal(proposal, 2n * PUSD_SCALE);
 
     expect(
       database.claimAutonomousExecution(proposal.id, proposal.hash, null, NOW_MS + 1)

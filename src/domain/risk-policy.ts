@@ -230,6 +230,17 @@ export function evaluateOrderRisk(
     });
   }
 
+  if (
+    intent.executionMode === "live" &&
+    isExit &&
+    (market.bestBidMicros <= 0n || intent.limitPriceMicros > market.bestBidMicros)
+  ) {
+    violations.push({
+      code: "EXIT_PRICE_ABOVE_BID",
+      message: "EXIT limit price must be at or below the fresh approved best bid."
+    });
+  }
+
   if (!isExit && orderRiskMicros > maxOrderMicros) {
     violations.push({
       code: "ORDER_TOO_LARGE",

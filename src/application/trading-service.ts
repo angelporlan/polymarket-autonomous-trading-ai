@@ -437,7 +437,14 @@ export class TradingService {
         ]);
       }
     }
-    this.options.database.stageProposal(proposal);
+    let settledExitSharesMicros: bigint | undefined;
+    if (proposal.executionMode === "live" && proposal.intent === "EXIT") {
+      const portfolio = await this.getPortfolio();
+      settledExitSharesMicros = portfolio.positions
+        .filter((position) => position.tokenId === proposal.market.tokenId)
+        .reduce((total, position) => total + position.sizeMicros, 0n);
+    }
+    this.options.database.stageProposal(proposal, settledExitSharesMicros);
 
     if (input.executionMode === "paper") {
       const paperTrade = this.paperSimulator.tryImmediateFill(proposal, snapshot);
@@ -635,7 +642,10 @@ export class TradingService {
       if (action.shouldExit && rec.exitState !== "CLOSING" && rec.exitState !== "CLOSED") {
         try {
           const snapshot = await this.getMarketSnapshot({ conditionId: p.conditionId, tokenId: p.tokenId, outcome: p.outcome });
-          const limitPricePusd = formatMicros(snapshot.bestBidMicros > 0n ? snapshot.bestBidMicros : p.currentPriceMicros);
+          if (snapshot.bestBidMicros <= 0n) {
+            throw new Error("EXIT_BID_UNAVAILABLE");
+          }
+          const limitPricePusd = formatMicros(snapshot.bestBidMicros);
           const sharesPusd = formatMicros(p.sizeMicros);
           const exitReason = toExitReason(action.triggerReason);
 
@@ -670,10 +680,19 @@ export class TradingService {
             ]
           });
 
+          let exitAccepted = staged.proposal.executionMode === "paper";
           if (staged.proposal.executionMode === "live") {
-            await this.executeStagedProposal(staged.proposal.id, staged.proposal.hash);
+            const result = await this.executeStagedProposal(
+              staged.proposal.id,
+              staged.proposal.hash
+            );
+            exitAccepted =
+              result.accepted &&
+              this.options.database.getExecution(staged.proposal.id) !== null;
           }
-          rec = { ...rec, exitState: "CLOSING" };
+          if (exitAccepted) {
+            rec = { ...rec, exitState: "CLOSING" };
+          }
         } catch {
           // Retain state if execution fails safely
         }

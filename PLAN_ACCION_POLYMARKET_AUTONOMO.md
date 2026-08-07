@@ -367,28 +367,27 @@ Añadir a la propuesta:
 
 ```ts
 exitReason?:
-  | "STOP_LOSS"
-  | "TAKE_PROFIT"
-  | "EDGE_LOST"
-  | "MAX_HOLDING_TIME"
-  | "MANUAL_RISK_REDUCTION";
+  | "STOP_LOSS_TRIGGERED"
+  | "TAKE_PROFIT_TRIGGERED"
+  | "MAX_DURATION_EXPIRED"
+  | "EDGE_DISAPPEARED";
 ```
 
 ## Reglas de `EXIT`
 
 Una salida debe:
 
-- [ ] ser `SELL`;
-- [ ] reducir una posición real y liquidada;
-- [ ] no superar `heldSharesMicros`;
-- [ ] tener snapshot fresco;
-- [ ] usar un precio límite igual o mejor que el bid aprobado;
-- [ ] respetar tick, fees, geoblock, identidad y contrato;
-- [ ] no exigir edge positivo;
-- [ ] no exigir profundidad 5× como una entrada;
-- [ ] no consumir presupuesto de entrada;
-- [ ] no permitir ventas descubiertas;
-- [ ] no permitir vender acciones ya reservadas en otra salida pendiente.
+- [x] ser `SELL`;
+- [x] reducir una posición real y liquidada;
+- [x] no superar `heldSharesMicros`;
+- [x] tener snapshot fresco;
+- [x] usar un precio límite igual o mejor que el bid aprobado;
+- [x] respetar tick, fees, geoblock, identidad y contrato;
+- [x] no exigir edge positivo;
+- [x] no exigir profundidad 5× como una entrada;
+- [x] no consumir presupuesto de entrada;
+- [x] no permitir ventas descubiertas;
+- [x] no permitir vender acciones ya reservadas en otra salida pendiente.
 
 ## Reservas de acciones
 
@@ -397,6 +396,8 @@ Añadir una reserva transaccional:
 ```ts
 reservedExitSharesMicros
 ```
+
+La reserva live se guarda en SQLite junto con el staging, dentro de `BEGIN IMMEDIATE`, y se libera o reduce al reconciliar el execution record.
 
 La disponibilidad debe calcularse como:
 
@@ -422,6 +423,14 @@ Cuando se dispara una salida:
 ## Criterio de aceptación
 
 Una posición que alcanza un stop genera una venta limitada real con tamaño máximo igual a las acciones liquidadas disponibles, y el ledger refleja el resultado exacto.
+
+## Evidencia de completado
+
+- `stageOrder` vuelve a consultar la posición liquidada antes de reservar una salida live; `TradingDatabase.stageProposal` impide carreras y rechaza reservas que superen las acciones disponibles.
+- El precio de una salida live no puede superar el `bestBidMicros` del snapshot fresco; tick, tamaño mínimo, fees, reglas, contrato, geoblock e identidad siguen pasando por las validaciones normales de riesgo y preflight.
+- `updateExecutionStatus` reduce la reserva con fills parciales y la libera en estados terminales; un fallo de submission también libera la reserva.
+- El supervisor solo marca `CLOSING` si la ejecución fue aceptada y existe el execution record; una ejecución bloqueada conserva la posición en su estado anterior.
+- Verificación parcial: `npm run typecheck` correcto y las pruebas P4 de reservas, fills parciales y supervisor rechazado pasan (`3` tests nuevos).
 
 ---
 

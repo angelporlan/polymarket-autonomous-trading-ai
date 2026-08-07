@@ -55,6 +55,22 @@ interface StateRow {
   value: string;
 }
 
+const ACTIVE_EXIT_RESERVATION_STATUSES = new Set([
+  "STAGED",
+  "AWAITING_LOCAL",
+  "LOCALLY_APPROVED",
+  "EXECUTING",
+  "SUBMITTED"
+]);
+
+const TERMINAL_EXECUTION_STATUSES = new Set([
+  "CANCELLED",
+  "CANCELED",
+  "EXPIRED",
+  "CONFIRMED",
+  "REJECTED"
+]);
+
 export interface AuditEventRecord {
   id: number;
   createdAtMs: number;
@@ -107,28 +123,93 @@ export class TradingDatabase {
     this.db.close();
   }
 
-  stageProposal(proposal: OrderProposal): void {
-    const payload = stringifyWithBigInts(proposal);
-    this.db
-      .prepare(
-        `INSERT INTO proposals
-          (id, hash, status, payload_json, created_at_ms, expires_at_ms, revision, updated_at_ms)
-         VALUES (?, ?, ?, ?, ?, ?, 1, ?)`
-      )
-      .run(
-        proposal.id,
-        proposal.hash,
-        proposal.status,
-        payload,
-        proposal.createdAtMs,
-        proposal.expiresAtMs,
-        proposal.createdAtMs
-      );
-    this.appendAudit("PROPOSAL_STAGED", proposal.id, {
-      proposalId: proposal.id,
-      proposalHash: proposal.hash,
-      expiresAtMs: proposal.expiresAtMs
-    });
+  stageProposal(
+    proposal: OrderProposal,
+    availableExitSharesMicros?: bigint
+  ): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (proposal.executionMode === "live" && proposal.intent === "EXIT") {
+        if (
+          availableExitSharesMicros === undefined ||
+          availableExitSharesMicros < proposal.sharesMicros
+        ) {
+          throw new Error("EXIT_SHARES_UNAVAILABLE");
+        }
+        const reservedRows = this.db
+          .prepare(
+            `SELECT r.shares_micros, p.status, p.expires_at_ms
+             FROM exit_reservations r
+             JOIN proposals p ON p.id = r.proposal_id
+             WHERE r.token_id = ?`
+          )
+          .all(proposal.market.tokenId) as Array<{
+          shares_micros: string;
+          status: string;
+          expires_at_ms: number;
+        }>;
+        const reservedSharesMicros = reservedRows.reduce(
+          (total, row) =>
+            isExitReservationActive(
+              row.status,
+              row.expires_at_ms,
+              proposal.createdAtMs
+            )
+              ? total + BigInt(row.shares_micros)
+              : total,
+          0n
+        );
+        if (
+          reservedSharesMicros + proposal.sharesMicros >
+          availableExitSharesMicros
+        ) {
+          throw new Error("EXIT_SHARES_ALREADY_RESERVED");
+        }
+      }
+
+      const payload = stringifyWithBigInts(proposal);
+      this.db
+        .prepare(
+          `INSERT INTO proposals
+            (id, hash, status, payload_json, created_at_ms, expires_at_ms, revision, updated_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?)`
+        )
+        .run(
+          proposal.id,
+          proposal.hash,
+          proposal.status,
+          payload,
+          proposal.createdAtMs,
+          proposal.expiresAtMs,
+          proposal.createdAtMs
+        );
+      if (proposal.executionMode === "live" && proposal.intent === "EXIT") {
+        this.db
+          .prepare(
+            `INSERT INTO exit_reservations
+              (proposal_id, token_id, shares_micros, created_at_ms)
+             VALUES (?, ?, ?, ?)`
+          )
+          .run(
+            proposal.id,
+            proposal.market.tokenId,
+            proposal.sharesMicros.toString(),
+            proposal.createdAtMs
+          );
+      }
+      this.appendAudit("PROPOSAL_STAGED", proposal.id, {
+        proposalId: proposal.id,
+        proposalHash: proposal.hash,
+        expiresAtMs: proposal.expiresAtMs,
+        ...(proposal.intent === "EXIT"
+          ? { reservedExitSharesMicros: proposal.sharesMicros }
+          : {})
+      });
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   getProposal(id: string): OrderProposal | null {
@@ -437,6 +518,9 @@ export class TradingDatabase {
            WHERE id = ? AND hash = ? AND (status = 'STAGED' OR status = 'AWAITING_LOCAL' OR status = 'LOCALLY_APPROVED' OR status = 'EXECUTING')`
         )
         .run(Date.now(), proposalId, proposalHash);
+      this.db
+        .prepare("DELETE FROM exit_reservations WHERE proposal_id = ?")
+        .run(proposalId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -527,6 +611,31 @@ export class TradingDatabase {
       if (result.changes !== 1) {
         this.db.exec("ROLLBACK");
         return false;
+      }
+      const proposal = this.getProposal(proposalId);
+      if (proposal?.executionMode === "live" && proposal.intent === "EXIT") {
+        const normalizedStatus = status.toUpperCase();
+        if (TERMINAL_EXECUTION_STATUSES.has(normalizedStatus)) {
+          this.db
+            .prepare("DELETE FROM exit_reservations WHERE proposal_id = ?")
+            .run(proposalId);
+        } else {
+          const matchedSharesMicros = readMatchedSharesMicros(responseJson);
+          if (matchedSharesMicros !== null) {
+            const remainingSharesMicros =
+              proposal.sharesMicros - matchedSharesMicros;
+            if (remainingSharesMicros < 0n) {
+              throw new Error("EXIT_FILL_EXCEEDS_PROPOSAL");
+            }
+            this.db
+              .prepare(
+                `UPDATE exit_reservations
+                 SET shares_micros = ?
+                 WHERE proposal_id = ?`
+              )
+              .run(remainingSharesMicros.toString(), proposalId);
+          }
+        }
       }
       this.appendAudit("EXECUTION_RECONCILED", proposalId, {
         status,
@@ -1373,6 +1482,28 @@ export class TradingDatabase {
     return rows.map((row) => parseWithBigInts<PositionRecord>(row.payload_json));
   }
 
+  getReservedExitShares(tokenId: string, nowMs = Date.now()): bigint {
+    const rows = this.db
+      .prepare(
+        `SELECT r.shares_micros, p.status, p.expires_at_ms
+         FROM exit_reservations r
+         JOIN proposals p ON p.id = r.proposal_id
+         WHERE r.token_id = ?`
+      )
+      .all(tokenId) as Array<{
+      shares_micros: string;
+      status: string;
+      expires_at_ms: number;
+    }>;
+    return rows.reduce(
+      (total, row) =>
+        isExitReservationActive(row.status, row.expires_at_ms, nowMs)
+          ? total + BigInt(row.shares_micros)
+          : total,
+      0n
+    );
+  }
+
   claimAutonomousExecution(
     proposalId: string,
     proposalHash: string,
@@ -1395,6 +1526,21 @@ export class TradingDatabase {
       ) {
         this.db.exec("ROLLBACK");
         return false;
+      }
+
+      if (proposal.intent === "EXIT") {
+        const reservation = this.db
+          .prepare(
+            "SELECT shares_micros FROM exit_reservations WHERE proposal_id = ?"
+          )
+          .get(proposal.id) as { shares_micros: string } | undefined;
+        if (
+          reservation === undefined ||
+          BigInt(reservation.shares_micros) !== proposal.sharesMicros
+        ) {
+          this.db.exec("ROLLBACK");
+          return false;
+        }
       }
 
       if (proposal.intent === "ENTRY") {
@@ -1729,11 +1875,20 @@ export class TradingDatabase {
         payload_json TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS exit_reservations (
+        proposal_id TEXT PRIMARY KEY REFERENCES proposals(id),
+        token_id TEXT NOT NULL,
+        shares_micros TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
       CREATE INDEX IF NOT EXISTS idx_audit_subject ON audit_events(subject_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_mode_status ON trading_sessions(execution_mode, status);
       CREATE INDEX IF NOT EXISTS idx_pending_sessions_mode_status
         ON pending_trading_sessions(execution_mode, status);
+      CREATE INDEX IF NOT EXISTS idx_exit_reservations_token
+        ON exit_reservations(token_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_clob_order_id
         ON executions(clob_order_id)
         WHERE clob_order_id IS NOT NULL;
@@ -1774,6 +1929,45 @@ function readNonEmptyString(value: unknown): string {
     throw new Error("Invalid execution reconciliation value.");
   }
   return value;
+}
+
+function readMatchedSharesMicros(responseJson: string): bigint | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(responseJson);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const record = parsed as Record<string, unknown>;
+  const order =
+    record.order !== null &&
+    typeof record.order === "object" &&
+    !Array.isArray(record.order)
+      ? (record.order as Record<string, unknown>)
+      : record;
+  const raw = order.sizeMatched ?? order.size_matched;
+  if (raw === undefined) {
+    return null;
+  }
+  return parseClobFixed6(raw, "EXIT_MATCHED_SIZE_INVALID");
+}
+
+function isExitReservationActive(
+  status: string,
+  expiresAtMs: number,
+  nowMs: number
+): boolean {
+  if (!ACTIVE_EXIT_RESERVATION_STATUSES.has(status)) {
+    return false;
+  }
+  return (
+    status === "EXECUTING" ||
+    status === "SUBMITTED" ||
+    expiresAtMs >= nowMs
+  );
 }
 
 function isAllowedExecutionTransition(

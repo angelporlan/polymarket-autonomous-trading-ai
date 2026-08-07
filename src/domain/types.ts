@@ -120,6 +120,7 @@ export interface RiskViolation {
     | "SOURCE_VALIDATION_FAILED"
     | "SESSION_BUDGET_EXCEEDED"
     | "SESSION_INACTIVE"
+    | "EXIT_PRICE_ABOVE_BID"
     | "INVALID_ORDER_INTENT"
     | "INVALID_VALUE";
   message: string;
