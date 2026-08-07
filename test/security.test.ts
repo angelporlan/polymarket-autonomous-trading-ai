@@ -517,6 +517,7 @@ function makeProposal(nowMs: number): OrderProposal {
     status: "STAGED",
     createdAtMs: nowMs,
     expiresAtMs: nowMs + 90_000,
+    intent: "ENTRY",
     executionMode: "live",
     market: {
       conditionId: "condition",

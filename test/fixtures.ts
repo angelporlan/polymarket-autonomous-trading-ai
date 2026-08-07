@@ -46,6 +46,7 @@ export function marketFixture(nowMs = Date.now()): MarketSnapshot {
 
 export function intentFixture(nowMs = Date.now()): OrderIntent {
   return {
+    intent: "ENTRY",
     executionMode: "paper",
     market: marketFixture(nowMs),
     side: "BUY",

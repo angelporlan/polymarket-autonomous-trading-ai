@@ -85,6 +85,18 @@ export function evaluateOrderRisk(
 ): RiskEvaluation {
   const violations: RiskViolation[] = [];
   const { market } = intent;
+  if (
+    (intent.intent === "ENTRY" && intent.side !== "BUY") ||
+    (intent.intent === "EXIT" && intent.side !== "SELL") ||
+    (intent.intent === "EXIT" && intent.exitReason === undefined) ||
+    (intent.intent === "ENTRY" && intent.exitReason !== undefined)
+  ) {
+    violations.push({
+      code: "INVALID_ORDER_INTENT",
+      message:
+        "ENTRY orders must be BUY without an exit reason; EXIT orders must be SELL with an exit reason."
+    });
+  }
   const maxCostMicros = multiplyMicros(intent.limitPriceMicros, intent.sharesMicros);
   const estimatedFeeMicros = estimateMaximumTakerFeeMicros(
     intent.sharesMicros,

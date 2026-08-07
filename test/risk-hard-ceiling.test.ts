@@ -38,6 +38,7 @@ describe("Risk Hard Ceilings Guardrails", () => {
 
   it("evaluateOrderRisk returns HARD_CEILING_EXCEEDED if post-trade total exposure breaches hard limit", () => {
     const mockIntent: OrderIntent = {
+      intent: "ENTRY",
       executionMode: "live",
       side: "BUY",
       sharesMicros: 200n * PUSD_SCALE,

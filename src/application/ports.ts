@@ -5,6 +5,8 @@ import type {
   MarketSnapshot,
   OrderProposal,
   OrderSide,
+  OrderIntentType,
+  ExitReason,
   PaperTrade,
   PortfolioSnapshot,
   RiskContext,
@@ -136,7 +138,8 @@ export interface ApprovalUrlPort {
 
 export interface StageOrderInput {
   executionMode: "paper" | "live";
-  intent?: "ENTRY" | "EXIT";
+  intent: OrderIntentType;
+  exitReason?: ExitReason;
   conditionId: string;
   tokenId: string;
   outcome: string;

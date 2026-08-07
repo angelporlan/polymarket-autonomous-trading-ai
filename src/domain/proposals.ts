@@ -36,6 +36,7 @@ export function createOrderProposal(
     status: "STAGED" as const,
     createdAtMs: context.nowMs,
     expiresAtMs: context.nowMs + policy.proposalTtlMs,
+    intent: intent.intent,
     executionMode: intent.executionMode,
     market: intent.market,
     side: intent.side,
@@ -55,7 +56,10 @@ export function createOrderProposal(
     counterThesis: intent.counterThesis.trim(),
     sources: intent.sources,
     correlationKey: intent.correlationKey,
-    policyVersion: RISK_POLICY_VERSION
+    policyVersion: RISK_POLICY_VERSION,
+    ...(intent.exitReason === undefined
+      ? {}
+      : { exitReason: intent.exitReason })
   };
 
   const hash = hashCanonical(proposalHashMaterial(proposalWithoutHash));

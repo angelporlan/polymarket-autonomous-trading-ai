@@ -5,6 +5,7 @@ import {
   createMcpServer,
   type McpToolDependencies
 } from "../src/mcp/server.js";
+import { stageOrderInputSchema } from "../src/mcp/schemas.js";
 
 const proposalId = "00000000-0000-4000-8000-000000000001";
 const proposalHash = "a".repeat(64);
@@ -49,6 +50,72 @@ async function connect(deps: McpToolDependencies) {
 }
 
 describe("Polymarket MCP contract", () => {
+  it("requires a coherent ENTRY or EXIT intent at the stage_order boundary", () => {
+    const common = {
+      executionMode: "paper" as const,
+      tokenId: "123456789",
+      conditionId: "condition-1",
+      outcome: "Yes",
+      shares: "1",
+      limitPricePusd: "0.4",
+      estimatedProbability: "0.5",
+      thesis: "The primary evidence supports this trading thesis clearly.",
+      counterThesis: "The evidence could be wrong or the outcome could fail.",
+      sources: [
+        {
+          url: "https://example.gov/official",
+          title: "Official source",
+          publishedAt: null,
+          retrievedAt: "2026-08-07T10:00:00.000Z",
+          primary: true
+        }
+      ],
+      confirmsNoConfidentialInformation: true as const,
+      confirmsNoOutcomeInfluence: true as const
+    };
+
+    expect(
+      stageOrderInputSchema.safeParse({
+        ...common,
+        intent: "ENTRY",
+        side: "BUY"
+      }).success
+    ).toBe(true);
+    expect(
+      stageOrderInputSchema.safeParse({
+        ...common,
+        intent: "EXIT",
+        side: "SELL",
+        exitReason: "STOP_LOSS_TRIGGERED"
+      }).success
+    ).toBe(true);
+    expect(
+      stageOrderInputSchema.safeParse({ ...common, side: "BUY" }).success
+    ).toBe(false);
+    expect(
+      stageOrderInputSchema.safeParse({
+        ...common,
+        intent: "ENTRY",
+        side: "SELL"
+      }).success
+    ).toBe(false);
+    expect(
+      stageOrderInputSchema.safeParse({
+        ...common,
+        intent: "EXIT",
+        side: "SELL"
+      }).success
+    ).toBe(false);
+    expect(
+      stageOrderInputSchema.safeParse({
+        ...common,
+        intent: "EXIT",
+        side: "BUY",
+        exitReason: "STOP_LOSS_TRIGGERED"
+      }).success
+    ).toBe(false);
+  });
+
   it("registers all session, supervisor, and execution tools with schemas and annotations", async () => {
     const { client, server } = await connect(createDependencies());
     try {

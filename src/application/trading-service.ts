@@ -16,6 +16,7 @@ import {
   multiplyMicros,
   parseDecimalToMicros,
   PUSD_SCALE,
+  type ExitReason,
   type ExitState,
   type MarketSnapshot,
   type OrderIntent,
@@ -307,6 +308,7 @@ export class TradingService {
       input.executionMode
     );
     const intent: OrderIntent = {
+      intent: input.intent,
       executionMode: input.executionMode,
       market: snapshot,
       side: input.side,
@@ -316,7 +318,10 @@ export class TradingService {
       thesis: input.thesis,
       counterThesis: input.counterThesis,
       sources: input.sources,
-      correlationKey
+      correlationKey,
+      ...(input.exitReason === undefined
+        ? {}
+        : { exitReason: input.exitReason })
     };
     let proposal: OrderProposal;
     try {
@@ -549,6 +554,7 @@ export class TradingService {
           const snapshot = await this.getMarketSnapshot({ conditionId: p.conditionId, tokenId: p.tokenId, outcome: p.outcome });
           const limitPricePusd = formatMicros(snapshot.bestBidMicros > 0n ? snapshot.bestBidMicros : p.currentPriceMicros);
           const sharesPusd = formatMicros(p.sizeMicros);
+          const exitReason = toExitReason(action.triggerReason);
 
           const staged = await this.stageOrder({
             executionMode: this.options.liveEnvironmentEnabled ? "live" : "paper",
@@ -560,6 +566,7 @@ export class TradingService {
             shares: sharesPusd,
             limitPrice: limitPricePusd,
             estimatedProbability: limitPricePusd,
+            exitReason,
             thesis: `Position exit supervisor auto-execution triggered: ${action.triggerReason}. ${action.explanation}`,
             counterThesis: "Position supervisor exit policy execution mandated to control downside risk.",
             sources: [
@@ -1124,6 +1131,9 @@ export class TradingService {
   }
 
   private async revalidateProposal(proposal: OrderProposal): Promise<void> {
+    if (!verifyProposalHash(proposal)) {
+      throw new Error("PROPOSAL_HASH_INVALID");
+    }
     const refreshed = await this.options.marketData.getMarketSnapshot({
       conditionId: proposal.market.conditionId,
       tokenId: proposal.market.tokenId,
@@ -1141,6 +1151,7 @@ export class TradingService {
     );
     const evaluation = evaluateOrderRisk(
       {
+        intent: proposal.intent,
         executionMode: "live",
         market: refreshed,
         side: proposal.side,
@@ -1150,7 +1161,10 @@ export class TradingService {
         thesis: proposal.thesis,
         counterThesis: proposal.counterThesis,
         sources: proposal.sources,
-        correlationKey: proposal.correlationKey
+        correlationKey: proposal.correlationKey,
+        ...(proposal.exitReason === undefined
+          ? {}
+          : { exitReason: proposal.exitReason })
       },
       context
     );
@@ -1204,6 +1218,18 @@ function requireResearchFields(input: StageOrderInput, nowMs = Date.now()): void
         message: `Source validation failed: ${validation.violations.join("; ")}`
       }
     ]);
+  }
+}
+
+function toExitReason(reason: ExitState): ExitReason {
+  switch (reason) {
+    case "STOP_LOSS_TRIGGERED":
+    case "TAKE_PROFIT_TRIGGERED":
+    case "MAX_DURATION_EXPIRED":
+    case "EDGE_DISAPPEARED":
+      return reason;
+    default:
+      throw new Error("UNSUPPORTED_EXIT_REASON");
   }
 }
 

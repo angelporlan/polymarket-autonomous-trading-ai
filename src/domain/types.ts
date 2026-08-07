@@ -3,6 +3,12 @@ export const PUSD_SCALE = 1_000_000n;
 export type MarketCategory = "politics" | "economics" | "technology";
 export type OrderSide = "BUY" | "SELL";
 export type ExecutionMode = "paper" | "live";
+export type OrderIntentType = "ENTRY" | "EXIT";
+export type ExitReason =
+  | "STOP_LOSS_TRIGGERED"
+  | "TAKE_PROFIT_TRIGGERED"
+  | "MAX_DURATION_EXPIRED"
+  | "EDGE_DISAPPEARED";
 export type ProposalStatus =
   | "STAGED"
   | "SIMULATED"
@@ -58,6 +64,7 @@ export interface EvidenceSource {
 }
 
 export interface OrderIntent {
+  intent: OrderIntentType;
   executionMode: ExecutionMode;
   market: MarketSnapshot;
   side: OrderSide;
@@ -68,7 +75,7 @@ export interface OrderIntent {
   counterThesis: string;
   sources: EvidenceSource[];
   correlationKey: string;
-  intent?: "ENTRY" | "EXIT";
+  exitReason?: ExitReason;
 }
 
 export interface RiskContext {
@@ -112,6 +119,7 @@ export interface RiskViolation {
     | "SOURCE_VALIDATION_FAILED"
     | "SESSION_BUDGET_EXCEEDED"
     | "SESSION_INACTIVE"
+    | "INVALID_ORDER_INTENT"
     | "INVALID_VALUE";
   message: string;
 }
@@ -122,6 +130,7 @@ export interface OrderProposal {
   status: ProposalStatus;
   createdAtMs: number;
   expiresAtMs: number;
+  intent: OrderIntentType;
   executionMode: ExecutionMode;
   market: MarketSnapshot;
   side: OrderSide;
@@ -139,7 +148,7 @@ export interface OrderProposal {
   sources: EvidenceSource[];
   correlationKey: string;
   policyVersion: string;
-  intent?: "ENTRY" | "EXIT";
+  exitReason?: ExitReason;
 }
 
 export type ExitState =

@@ -44,6 +44,13 @@ export const marketCategorySchema = z.enum([
   "technology"
 ]);
 export const orderSideSchema = z.enum(["BUY", "SELL"]);
+export const orderIntentSchema = z.enum(["ENTRY", "EXIT"]);
+export const exitReasonSchema = z.enum([
+  "STOP_LOSS_TRIGGERED",
+  "TAKE_PROFIT_TRIGGERED",
+  "MAX_DURATION_EXPIRED",
+  "EDGE_DISAPPEARED"
+]);
 
 export const evidenceSourceSchema = z
   .object({
@@ -160,6 +167,7 @@ export const orderProposalSchema = z
     proposalId: proposalIdSchema,
     proposalHash: proposalHashSchema,
     status: z.enum(["STAGED", "SIMULATED", "AWAITING_LOCAL"]),
+    intent: orderIntentSchema,
     executionMode: z.enum(["paper", "live"]),
     createdAt: timestampSchema,
     expiresAt: timestampSchema,
@@ -178,9 +186,40 @@ export const orderProposalSchema = z
     counterThesis: z.string().trim().min(20),
     sources: z.array(evidenceSourceSchema).min(1),
     correlationKey: z.string().trim().min(1).max(200),
-    policyVersion: z.string().trim().min(1)
+    policyVersion: z.string().trim().min(1),
+    exitReason: exitReasonSchema.optional()
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.intent === "ENTRY" && value.side !== "BUY") {
+      context.addIssue({
+        code: "custom",
+        path: ["side"],
+        message: "ENTRY proposals must use BUY."
+      });
+    }
+    if (value.intent === "EXIT" && value.side !== "SELL") {
+      context.addIssue({
+        code: "custom",
+        path: ["side"],
+        message: "EXIT proposals must use SELL."
+      });
+    }
+    if (value.intent === "EXIT" && value.exitReason === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["exitReason"],
+        message: "EXIT proposals require exitReason."
+      });
+    }
+    if (value.intent === "ENTRY" && value.exitReason !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["exitReason"],
+        message: "ENTRY proposals cannot include exitReason."
+      });
+    }
+  });
 
 export const getAccountStatusInputSchema = z.object({}).strict();
 export const getAccountStatusOutputSchema = z
@@ -323,7 +362,7 @@ export const getOrderStatusOutputSchema = z
 export const stageOrderInputSchema = z
   .object({
     executionMode: z.enum(["paper", "live"]).default("paper"),
-    intent: z.enum(["ENTRY", "EXIT"]).default("ENTRY"),
+    intent: orderIntentSchema,
     tokenId: identifierSchema,
     conditionId: identifierSchema.optional(),
     outcome: z.string().trim().min(1).max(200),
@@ -334,10 +373,41 @@ export const stageOrderInputSchema = z
     thesis: z.string().trim().min(20).max(5_000),
     counterThesis: z.string().trim().min(20).max(5_000),
     sources: z.array(evidenceSourceSchema).min(1).max(20),
+    exitReason: exitReasonSchema.optional(),
     confirmsNoConfidentialInformation: z.literal(true),
     confirmsNoOutcomeInfluence: z.literal(true)
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.intent === "ENTRY" && value.side !== "BUY") {
+      context.addIssue({
+        code: "custom",
+        path: ["side"],
+        message: "ENTRY orders must use BUY."
+      });
+    }
+    if (value.intent === "EXIT" && value.side !== "SELL") {
+      context.addIssue({
+        code: "custom",
+        path: ["side"],
+        message: "EXIT orders must use SELL."
+      });
+    }
+    if (value.intent === "EXIT" && value.exitReason === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["exitReason"],
+        message: "EXIT orders require exitReason."
+      });
+    }
+    if (value.intent === "ENTRY" && value.exitReason !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["exitReason"],
+        message: "ENTRY orders cannot include exitReason."
+      });
+    }
+  });
 export const stageOrderOutputSchema = orderProposalSchema;
 
 export const executeStagedOrderInputSchema = z

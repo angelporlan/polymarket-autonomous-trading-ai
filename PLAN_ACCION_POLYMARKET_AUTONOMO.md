@@ -38,21 +38,21 @@ Convertir el proyecto en un sistema de trading autónomo **operativamente comple
 
 ## Tareas
 
-- [ ] Mantener `POLYMARKET_LIVE_ENABLED=false` en configuración local y versionada.
-- [ ] Mantener `PAPER_GATE_SKIP=false` durante el desarrollo normal.
-- [ ] Confirmar que no existe ningún `cron`, `launchd`, daemon o proceso MCP antiguo ejecutándose.
-- [ ] Mantener bloqueados:
+- [x] Mantener `POLYMARKET_LIVE_ENABLED=false` en configuración local y versionada.
+- [x] Mantener `PAPER_GATE_SKIP=false` durante el desarrollo normal.
+- [x] Confirmar que no existe ningún `cron`, `launchd`, daemon o proceso MCP antiguo ejecutándose.
+- [x] Mantener bloqueados:
   - `scripts/run-live-cycle.ts`
   - `scripts/stage-fresh-order.ts`
-- [ ] Crear una etiqueta Git antes de empezar:
+- [x] Crear una etiqueta Git antes de empezar:
 
 ```bash
 git tag pre-autonomy-hardening
 git push origin pre-autonomy-hardening
 ```
 
-- [ ] Exportar una copia privada del ledger actual.
-- [ ] Ejecutar y guardar el resultado de:
+- [x] Exportar una copia privada del ledger actual.
+- [x] Ejecutar y guardar el resultado de:
 
 ```bash
 npm ci
@@ -67,6 +67,16 @@ npm audit
 - El repositorio compila y pasa las pruebas con live desactivado.
 - No hay proceso capaz de enviar una orden real durante las siguientes fases.
 
+## Evidencia de completado
+
+- Configuración efectiva verificada: `liveEnabled=false` y `paperGateSkip=false`.
+- No quedan procesos MCP de este repositorio, cron, launchd, LaunchAgent ni crontab activos. Las seis instancias encontradas antes de cerrar live fueron terminadas de forma explícita.
+- `run-live-cycle.ts` y `stage-fresh-order.ts` fallan cerrados antes de construir un runtime, ambos con código de salida `1`.
+- Ledger exportado en `exports/p0-baseline.yNobZF/`, ignorado por Git, con permisos privados (`600`) y `auditChainValid=true`.
+- Baseline: `npm ci` correcto, `npm run typecheck` correcto, `npm test` correcto (`24` archivos, `226` tests), `npm run build` correcto.
+- `npm audit` ejecutado: quedan `18` vulnerabilidades (`12` low, `4` moderate, `2` high); no se aplicó `npm audit fix --force`.
+- Etiqueta creada y publicada: `pre-autonomy-hardening`.
+
 ---
 
 # P1 — Propagar `intent: ENTRY | EXIT` correctamente
@@ -79,7 +89,7 @@ Actualmente `intent` puede existir en el esquema MCP, pero debe conservarse de f
 
 ### `src/domain/types.ts`
 
-- [ ] Hacer `intent` obligatorio, no opcional:
+- [x] Hacer `intent` obligatorio, no opcional:
 
 ```ts
 export type OrderIntentType = "ENTRY" | "EXIT";
@@ -97,41 +107,50 @@ export interface OrderProposal {
 
 ### `src/mcp/schemas.ts`
 
-- [ ] Mantener `intent` obligatorio en `stageOrderInputSchema`.
-- [ ] Añadir `intent` a `orderProposalSchema` y a la salida de `stage_order`.
-- [ ] Rechazar combinaciones incoherentes:
+- [x] Mantener `intent` obligatorio en `stageOrderInputSchema`.
+- [x] Añadir `intent` a `orderProposalSchema` y a la salida de `stage_order`.
+- [x] Rechazar combinaciones incoherentes:
   - `ENTRY + SELL` sin una posición explícita que se esté reduciendo;
   - `EXIT + BUY` para posiciones largas de outcomes;
   - `EXIT` sin `exitReason`.
 
 ### `src/runtime.ts`
 
-- [ ] Pasar `input.intent` a `TradingService.stageOrder`.
-- [ ] Incluir `intent` en `proposalOutput`.
+- [x] Pasar `input.intent` a `TradingService.stageOrder`.
+- [x] Incluir `intent` en `proposalOutput`.
 
 ### `src/application/ports.ts`
 
-- [ ] Hacer obligatorio `intent` en `StageOrderInput`.
-- [ ] Añadir `exitReason` cuando `intent === "EXIT"`.
+- [x] Hacer obligatorio `intent` en `StageOrderInput`.
+- [x] Añadir `exitReason` cuando `intent === "EXIT"`.
 
 ### `src/application/trading-service.ts`
 
-- [ ] Incluir `intent` al crear `OrderIntent`.
-- [ ] Incluir `intent` durante la revalidación previa a firma.
-- [ ] Prohibir cualquier cambio de `intent` tras staging.
+- [x] Incluir `intent` al crear `OrderIntent`.
+- [x] Incluir `intent` durante la revalidación previa a firma.
+- [x] Prohibir cualquier cambio de `intent` tras staging.
 
 ### `src/domain/proposals.ts`
 
-- [ ] Guardar `intent` en `OrderProposal`.
-- [ ] Incluirlo en el material canónico del hash.
+- [x] Guardar `intent` en `OrderProposal`.
+- [x] Incluirlo en el material canónico del hash.
 
 ## Pruebas mínimas
 
-- [ ] Una propuesta `ENTRY` conserva `ENTRY` desde MCP hasta el payload firmado.
-- [ ] Una propuesta `EXIT` conserva `EXIT` desde MCP hasta el payload firmado.
-- [ ] Modificar `intent` después de staging invalida el hash.
-- [ ] Una salida no se bloquea por `EDGE_TOO_SMALL`.
-- [ ] Una entrada sí sigue requiriendo edge mínimo.
+- [x] Una propuesta `ENTRY` conserva `ENTRY` desde MCP hasta el payload firmado.
+- [x] Una propuesta `EXIT` conserva `EXIT` desde MCP hasta el payload firmado.
+- [x] Modificar `intent` después de staging invalida el hash.
+- [x] Una salida no se bloquea por `EDGE_TOO_SMALL`.
+- [x] Una entrada sí sigue requiriendo edge mínimo.
+
+## Evidencia de completado
+
+- `intent` es obligatorio en los tipos de dominio, el puerto de aplicación y el esquema MCP.
+- `ENTRY` solo acepta `BUY`; `EXIT` solo acepta `SELL` y exige una razón explícita.
+- `intent` y `exitReason` se conservan en la propuesta y forman parte del hash canónico.
+- La revalidación previa a firma rechaza hashes inválidos y vuelve a evaluar el mismo `intent` y `exitReason`.
+- Cobertura añadida en los tests de dominio y contrato MCP para entradas, salidas, incoherencias, salida sin edge y mutación del hash.
+- Verificación: `npm run typecheck` correcto, `npm test` correcto (`24` archivos, `230` tests), `npm run build` correcto.
 
 ## Criterio de aceptación
 

@@ -389,7 +389,9 @@ describe("DatabaseRiskContext", () => {
 
     nowMs += 100;
     const sellIntent = intentFixture(nowMs);
+    sellIntent.intent = "EXIT";
     sellIntent.side = "SELL";
+    sellIntent.exitReason = "EDGE_DISAPPEARED";
     sellIntent.sharesMicros = 3n * PUSD_SCALE;
     sellIntent.limitPriceMicros = 390_000n;
     sellIntent.estimatedProbabilityMicros = 300_000n;
@@ -445,7 +447,9 @@ describe("DatabaseRiskContext", () => {
       "paper"
     );
     const restingSellIntent = intentFixture(nowMs);
+    restingSellIntent.intent = "EXIT";
     restingSellIntent.side = "SELL";
+    restingSellIntent.exitReason = "EDGE_DISAPPEARED";
     restingSellIntent.sharesMicros = 4n * PUSD_SCALE;
     restingSellIntent.limitPriceMicros = 410_000n;
     restingSellIntent.estimatedProbabilityMicros = 300_000n;
@@ -466,7 +470,9 @@ describe("DatabaseRiskContext", () => {
     expect(remaining.heldSharesMicros).toBe(1n * PUSD_SCALE);
 
     const excessiveSell = intentFixture(nowMs);
+    excessiveSell.intent = "EXIT";
     excessiveSell.side = "SELL";
+    excessiveSell.exitReason = "EDGE_DISAPPEARED";
     excessiveSell.sharesMicros = 2n * PUSD_SCALE;
     excessiveSell.limitPriceMicros = 390_000n;
     excessiveSell.estimatedProbabilityMicros = 300_000n;

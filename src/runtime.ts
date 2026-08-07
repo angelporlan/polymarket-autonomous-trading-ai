@@ -553,6 +553,7 @@ export class PolymarketRuntime {
     });
     const result = await this.service.stageOrder({
       executionMode: input.executionMode,
+      intent: input.intent,
       conditionId: reference.conditionId,
       tokenId: reference.tokenId,
       outcome: input.outcome,
@@ -562,7 +563,10 @@ export class PolymarketRuntime {
       estimatedProbability: input.estimatedProbability,
       thesis: input.thesis,
       counterThesis: input.counterThesis,
-      sources: input.sources
+      sources: input.sources,
+      ...(input.exitReason === undefined
+        ? {}
+        : { exitReason: input.exitReason })
     });
     return proposalOutput(result.proposal);
   }
@@ -965,6 +969,7 @@ function proposalOutput(proposal: OrderProposal): StageOrderOutput {
           ? "AWAITING_LOCAL"
           : "STAGED",
     executionMode: proposal.executionMode,
+    intent: proposal.intent,
     createdAt: new Date(proposal.createdAtMs).toISOString(),
     expiresAt: new Date(proposal.expiresAtMs).toISOString(),
     market: marketSnapshotOutput(proposal.market, "unknown", true),
@@ -986,7 +991,10 @@ function proposalOutput(proposal: OrderProposal): StageOrderOutput {
     counterThesis: proposal.counterThesis,
     sources: proposal.sources,
     correlationKey: proposal.correlationKey,
-    policyVersion: proposal.policyVersion
+    policyVersion: proposal.policyVersion,
+    ...(proposal.exitReason === undefined
+      ? {}
+      : { exitReason: proposal.exitReason })
   };
 }
 

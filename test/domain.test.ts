@@ -37,6 +37,16 @@ describe("risk evaluation", () => {
     expect(result.expectedEdgeMicros).toBe(100_000n);
   });
 
+  it("still requires minimum edge for ENTRY orders", () => {
+    const now = Date.now();
+    const intent = intentFixture(now);
+    intent.estimatedProbabilityMicros = 440_000n;
+    const result = evaluateOrderRisk(intent, riskContextFixture(now));
+    expect(result.violations.map((violation) => violation.code)).toContain(
+      "EDGE_TOO_SMALL"
+    );
+  });
+
   it("enforces the canary limit and then the pilot limit", () => {
     const now = Date.now();
     const intent = intentFixture(now);
@@ -69,7 +79,9 @@ describe("risk evaluation", () => {
   it("prevents selling more than the settled position", () => {
     const now = Date.now();
     const intent = intentFixture(now);
+    intent.intent = "EXIT";
     intent.side = "SELL";
+    intent.exitReason = "EDGE_DISAPPEARED";
     intent.estimatedProbabilityMicros = 300_000n;
     const result = evaluateOrderRisk(intent, riskContextFixture(now));
     expect(result.violations.map((violation) => violation.code)).toContain(
@@ -108,9 +120,52 @@ describe("proposals", () => {
     const now = Date.now();
     const proposal = createOrderProposal(intentFixture(now), riskContextFixture(now));
     expect(verifyProposalHash(proposal)).toBe(true);
+    expect(proposal.intent).toBe("ENTRY");
     expect(
       verifyProposalHash({ ...proposal, thesis: `${proposal.thesis} changed` })
     ).toBe(false);
+    expect(verifyProposalHash({ ...proposal, intent: "EXIT" })).toBe(false);
+  });
+
+  it("preserves EXIT intent and allows an exit without entry edge", () => {
+    const now = Date.now();
+    const intent = intentFixture(now);
+    intent.intent = "EXIT";
+    intent.side = "SELL";
+    intent.exitReason = "STOP_LOSS_TRIGGERED";
+    intent.estimatedProbabilityMicros = 500_000n;
+
+    const context = {
+      ...riskContextFixture(now),
+      heldSharesMicros: intent.sharesMicros
+    };
+    const proposal = createOrderProposal(intent, context);
+
+    expect(proposal.intent).toBe("EXIT");
+    expect(proposal.exitReason).toBe("STOP_LOSS_TRIGGERED");
+    expect(proposal.expectedEdgeMicros).toBe(-100_000n);
+    expect(verifyProposalHash(proposal)).toBe(true);
+  });
+
+  it("rejects incoherent intent and side or a missing exit reason", () => {
+    const now = Date.now();
+    const entrySell = intentFixture(now);
+    entrySell.side = "SELL";
+    expect(
+      evaluateOrderRisk(entrySell, riskContextFixture(now)).violations.map(
+        (violation) => violation.code
+      )
+    ).toContain("INVALID_ORDER_INTENT");
+
+    const exitWithoutReason = intentFixture(now);
+    exitWithoutReason.intent = "EXIT";
+    exitWithoutReason.side = "SELL";
+    expect(
+      evaluateOrderRisk(exitWithoutReason, {
+        ...riskContextFixture(now),
+        heldSharesMicros: exitWithoutReason.sharesMicros
+      }).violations.map((violation) => violation.code)
+    ).toContain("INVALID_ORDER_INTENT");
   });
 
   it("throws a structured rejection when policy fails", () => {
