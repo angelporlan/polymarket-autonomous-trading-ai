@@ -171,6 +171,7 @@ export const orderProposalSchema = z
     executionMode: z.enum(["paper", "live"]),
     createdAt: timestampSchema,
     expiresAt: timestampSchema,
+    sessionId: identifierSchema.nullable(),
     market: marketSnapshotSchema,
     side: orderSideSchema,
     shares: positiveDecimalSchema,

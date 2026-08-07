@@ -339,7 +339,7 @@ export class TradingService {
     requireResearchFields(input, this.now());
 
     const activeSession = this.options.database.getActiveTradingSession(input.executionMode, this.now());
-    if (!activeSession) {
+    if (!activeSession && (input.executionMode === "paper" || input.intent === "ENTRY")) {
       throw new ProposalRejectedError([
         {
           code: "SESSION_INACTIVE",
@@ -383,6 +383,7 @@ export class TradingService {
     );
     const intent: OrderIntent = {
       intent: input.intent,
+      sessionId: activeSession?.id ?? null,
       executionMode: input.executionMode,
       market: snapshot,
       side: input.side,
@@ -418,6 +419,14 @@ export class TradingService {
     }
 
     if (proposal.intent !== "EXIT") {
+      if (!activeSession) {
+        throw new ProposalRejectedError([
+          {
+            code: "SESSION_INACTIVE",
+            message: "The entry proposal requires an active trading session."
+          }
+        ]);
+      }
       const sessionCheck = isSessionValid(activeSession, proposal.maxLossMicros, this.now());
       if (!sessionCheck.valid) {
         throw new ProposalRejectedError([
@@ -500,7 +509,7 @@ export class TradingService {
     }
 
     const activeSession = this.options.database.getActiveTradingSession("live", nowMs);
-    if (!activeSession) {
+    if (proposal.intent === "ENTRY" && !activeSession) {
       throw new Error("LIVE_AUTONOMY_NOT_READY: No active authorized live trading session found.");
     }
 
@@ -511,7 +520,7 @@ export class TradingService {
       const claimed = this.options.database.claimAutonomousExecution(
         proposal.id,
         proposal.hash,
-        activeSession.id,
+        proposal.intent === "ENTRY" ? activeSession?.id ?? null : null,
         nowMs
       );
 
@@ -1226,6 +1235,7 @@ export class TradingService {
     const evaluation = evaluateOrderRisk(
       {
         intent: proposal.intent,
+        sessionId: proposal.sessionId,
         executionMode: "live",
         market: refreshed,
         side: proposal.side,

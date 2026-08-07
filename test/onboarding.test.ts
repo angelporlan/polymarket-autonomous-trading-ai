@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { zonedDayKey } from "../src/application/risk-context.js";
 import type { AppConfig } from "../src/config.js";
 import { createOrderProposal } from "../src/domain/proposals.js";
+import { createTradingSession } from "../src/domain/session.js";
 import type {
   LocalApproval,
   OrderProposal,
@@ -697,6 +698,13 @@ function seedSubmittedExecution(
   const nowMs = Date.now();
   const intent = intentFixture(nowMs);
   intent.executionMode = "live";
+  const session = createTradingSession({
+    executionMode: "live",
+    authorizedBudgetMicros: 10n * 1_000_000n,
+    nowMs
+  });
+  database.saveTradingSession(session);
+  intent.sessionId = session.id;
   const proposal = createOrderProposal(intent, riskContextFixture(nowMs));
   database.stageProposal(proposal);
   database.transitionProposal(

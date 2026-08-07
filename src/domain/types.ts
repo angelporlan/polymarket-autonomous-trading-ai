@@ -65,6 +65,7 @@ export interface EvidenceSource {
 
 export interface OrderIntent {
   intent: OrderIntentType;
+  sessionId?: string | null;
   executionMode: ExecutionMode;
   market: MarketSnapshot;
   side: OrderSide;
@@ -131,6 +132,7 @@ export interface OrderProposal {
   createdAtMs: number;
   expiresAtMs: number;
   intent: OrderIntentType;
+  sessionId: string | null;
   executionMode: ExecutionMode;
   market: MarketSnapshot;
   side: OrderSide;

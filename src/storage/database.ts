@@ -21,6 +21,7 @@ import {
 import {
   canonicalCorrelationKey
 } from "../domain/types.js";
+import { RISK_POLICY_VERSION } from "../domain/risk-policy.js";
 import { verifyProposalHash } from "../domain/proposals.js";
 import {
   normalizeClobOrderStatus,
@@ -260,6 +261,8 @@ export class TradingDatabase {
         proposal.hash !== proposalHash ||
         proposal.status !== "LOCALLY_APPROVED" ||
         proposal.expiresAtMs < nowMs ||
+        proposal.policyVersion !== RISK_POLICY_VERSION ||
+        !verifyProposalHash(proposal) ||
         !approval ||
         approval.proposalHash !== proposalHash ||
         approval.expiresAtMs < nowMs ||
@@ -267,6 +270,53 @@ export class TradingDatabase {
       ) {
         this.db.exec("ROLLBACK");
         return false;
+      }
+
+      if (proposal.executionMode === "live" && proposal.intent === "ENTRY") {
+        if (proposal.sessionId === null) {
+          this.db.exec("ROLLBACK");
+          return false;
+        }
+        const sessionRow = this.db
+          .prepare(
+            "SELECT payload_json FROM trading_sessions WHERE id = ? AND status = 'ACTIVE'"
+          )
+          .get(proposal.sessionId) as ProposalRow | undefined;
+        if (!sessionRow) {
+          this.db.exec("ROLLBACK");
+          return false;
+        }
+        const session = parseWithBigInts<TradingSession>(sessionRow.payload_json);
+        if (
+          session.executionMode !== "live" ||
+          nowMs >= session.expiresAtMs ||
+          session.remainingBudgetMicros < proposal.maxLossMicros
+        ) {
+          this.db.exec("ROLLBACK");
+          return false;
+        }
+        const remainingBudgetMicros =
+          session.remainingBudgetMicros - proposal.maxLossMicros;
+        const updatedSession: TradingSession = {
+          ...session,
+          remainingBudgetMicros,
+          status: remainingBudgetMicros === 0n ? "EXHAUSTED" : "ACTIVE"
+        };
+        const sessionUpdate = this.db
+          .prepare(
+            `UPDATE trading_sessions
+             SET status = ?, payload_json = ?
+             WHERE id = ? AND status = 'ACTIVE'`
+          )
+          .run(
+            updatedSession.status,
+            stringifyWithBigInts(updatedSession),
+            proposal.sessionId
+          );
+        if (sessionUpdate.changes !== 1) {
+          this.db.exec("ROLLBACK");
+          return false;
+        }
       }
 
       const consumed = this.db
@@ -1338,16 +1388,23 @@ export class TradingDatabase {
         proposal.status !== "STAGED" ||
         proposal.expiresAtMs < nowMs ||
         !verifyProposalHash(proposal) ||
-        proposal.executionMode !== "live"
+        proposal.executionMode !== "live" ||
+        proposal.policyVersion !== RISK_POLICY_VERSION ||
+        (proposal.intent === "EXIT" &&
+          (proposal.side !== "SELL" || proposal.maxLossMicros !== 0n))
       ) {
         this.db.exec("ROLLBACK");
         return false;
       }
 
-      if (sessionId) {
+      if (proposal.intent === "ENTRY") {
+        if (proposal.sessionId === null || proposal.sessionId !== sessionId) {
+          this.db.exec("ROLLBACK");
+          return false;
+        }
         const sessionRow = this.db
           .prepare("SELECT payload_json FROM trading_sessions WHERE id = ? AND status = 'ACTIVE'")
-          .get(sessionId) as ProposalRow | undefined;
+          .get(proposal.sessionId) as ProposalRow | undefined;
         if (!sessionRow) {
           this.db.exec("ROLLBACK");
           return false;
@@ -1356,27 +1413,29 @@ export class TradingDatabase {
         if (
           nowMs >= session.expiresAtMs ||
           session.executionMode !== "live" ||
-          (proposal.intent !== "EXIT" && session.remainingBudgetMicros < proposal.maxLossMicros)
+          session.remainingBudgetMicros < proposal.maxLossMicros
         ) {
           this.db.exec("ROLLBACK");
           return false;
         }
 
-        if (proposal.intent !== "EXIT") {
-          const newRemaining = session.remainingBudgetMicros - proposal.maxLossMicros;
-          const newStatus = newRemaining === 0n ? "EXHAUSTED" : "ACTIVE";
-          const updatedSession: TradingSession = {
-            ...session,
-            remainingBudgetMicros: newRemaining,
-            status: newStatus
-          };
-          this.db
-            .prepare(
-              `UPDATE trading_sessions
-               SET status = ?, payload_json = ?
-               WHERE id = ?`
-            )
-            .run(newStatus, stringifyWithBigInts(updatedSession), sessionId);
+        const newRemaining = session.remainingBudgetMicros - proposal.maxLossMicros;
+        const newStatus = newRemaining === 0n ? "EXHAUSTED" : "ACTIVE";
+        const updatedSession: TradingSession = {
+          ...session,
+          remainingBudgetMicros: newRemaining,
+          status: newStatus
+        };
+        const sessionUpdate = this.db
+          .prepare(
+            `UPDATE trading_sessions
+             SET status = ?, payload_json = ?
+             WHERE id = ? AND status = 'ACTIVE'`
+          )
+          .run(newStatus, stringifyWithBigInts(updatedSession), proposal.sessionId);
+        if (sessionUpdate.changes !== 1) {
+          this.db.exec("ROLLBACK");
+          return false;
         }
       }
 

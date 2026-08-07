@@ -303,11 +303,11 @@ Reglas:
 
 Al crear una entrada:
 
-- [ ] recuperar la sesión activa;
-- [ ] copiar su ID a la propuesta;
-- [ ] validar que sigue activa;
-- [ ] reservar `maxLossMicros`, no solo `maxCostMicros`;
-- [ ] no descontar todavía el presupuesto si el staging falla.
+- [x] recuperar la sesión activa;
+- [x] copiar su ID a la propuesta;
+- [x] validar que sigue activa;
+- [x] reservar `maxLossMicros`, no solo `maxCostMicros`;
+- [x] no descontar todavía el presupuesto si el staging falla.
 
 ## Ejecución atómica
 
@@ -337,16 +337,25 @@ commit
 
 ## Reintentos
 
-- [ ] Repetir `execute_staged_order` con el mismo ID/hash no crea otra orden.
-- [ ] Una propuesta `EXECUTING` o `SUBMITTED` no puede reclamarse de nuevo.
-- [ ] Una propuesta creada bajo una sesión no puede ejecutarse bajo una sesión posterior.
+- [x] Repetir `execute_staged_order` con el mismo ID/hash no crea otra orden.
+- [x] Una propuesta `EXECUTING` o `SUBMITTED` no puede reclamarse de nuevo.
+- [x] Una propuesta creada bajo una sesión no puede ejecutarse bajo una sesión posterior.
 
 ## Pruebas
 
-- [ ] Sesión A prepara propuesta; se cierra A; se crea B; la propuesta de A queda bloqueada.
-- [ ] Dos procesos reclaman simultáneamente la misma propuesta; solo uno gana.
-- [ ] La comisión hace que `maxLoss` supere el presupuesto; la orden queda bloqueada.
-- [ ] Una salida no descuenta presupuesto de entrada.
+- [x] Sesión A prepara propuesta; se cierra A; se crea B; la propuesta de A queda bloqueada.
+- [x] Dos procesos reclaman simultáneamente la misma propuesta; solo uno gana.
+- [x] La comisión hace que `maxLoss` supere el presupuesto; la orden queda bloqueada.
+- [x] Una salida no descuenta presupuesto de entrada.
+
+## Evidencia de completado
+
+- `OrderProposal.sessionId` es obligatorio, nullable y forma parte del hash inmutable; las salidas live pueden usar `null` y las entradas live copian la sesión activa. La política rechaza cualquier `ENTRY` live sin sesión.
+- El staging valida el presupuesto contra `maxLossMicros` sin descontarlo hasta el claim; si falla, no persiste ninguna reserva.
+- `claimAutonomousExecution` valida hash, estado, expiración, versión de política, sesión exacta, saldo y coherencia de salida dentro de `BEGIN IMMEDIATE`; reserva presupuesto y crea el execution record en la misma transacción.
+- La ruta heredada de ejecución local aplica las mismas comprobaciones de hash, versión y sesión para entradas live; las salidas no consumen presupuesto de entrada.
+- Se añadieron pruebas de sesión cruzada tras reinicio, claim one-shot, comisión sobre `maxLoss` y salida sin sesión activa.
+- Verificación: `npm run typecheck` correcto, `npm test` correcto (`25` archivos, `236` tests), `npm run build` correcto.
 
 ---
 

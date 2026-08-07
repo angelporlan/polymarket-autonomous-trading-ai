@@ -5,6 +5,7 @@ import {
   createOrderProposal,
   ProposalRejectedError
 } from "../src/domain/proposals.js";
+import { createTradingSession } from "../src/domain/session.js";
 import {
   PUSD_SCALE,
   type LocalApproval,
@@ -126,9 +127,16 @@ describe("DatabaseRiskContext", () => {
     const nowMs = Date.parse("2026-07-23T10:00:00.000Z");
     const database = new TradingDatabase(":memory:");
     const snapshot = marketFixture(nowMs);
+    const session = createTradingSession({
+      executionMode: "live",
+      authorizedBudgetMicros: 10n * PUSD_SCALE,
+      nowMs
+    });
+    database.saveTradingSession(session);
 
     const activeIntent = intentFixture(nowMs);
     activeIntent.executionMode = "live";
+    activeIntent.sessionId = session.id;
     activeIntent.sharesMicros = 5n * PUSD_SCALE;
     activeIntent.market.eventId = "shared-event";
     activeIntent.correlationKey = "event:shared-event";
@@ -140,6 +148,7 @@ describe("DatabaseRiskContext", () => {
 
     const terminalIntent = intentFixture(nowMs);
     terminalIntent.executionMode = "live";
+    terminalIntent.sessionId = session.id;
     terminalIntent.market = {
       ...terminalIntent.market,
       conditionId: `0x${"3".repeat(64)}`,

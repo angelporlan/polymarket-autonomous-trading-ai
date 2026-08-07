@@ -89,12 +89,15 @@ export function evaluateOrderRisk(
     (intent.intent === "ENTRY" && intent.side !== "BUY") ||
     (intent.intent === "EXIT" && intent.side !== "SELL") ||
     (intent.intent === "EXIT" && intent.exitReason === undefined) ||
-    (intent.intent === "ENTRY" && intent.exitReason !== undefined)
+    (intent.intent === "ENTRY" && intent.exitReason !== undefined) ||
+    (intent.executionMode === "live" &&
+      intent.intent === "ENTRY" &&
+      (intent.sessionId === undefined || intent.sessionId === null))
   ) {
     violations.push({
       code: "INVALID_ORDER_INTENT",
       message:
-        "ENTRY orders must be BUY without an exit reason; EXIT orders must be SELL with an exit reason."
+        "ENTRY orders must be BUY without an exit reason and live ENTRY orders require a session; EXIT orders must be SELL with an exit reason."
     });
   }
   const maxCostMicros = multiplyMicros(intent.limitPriceMicros, intent.sharesMicros);

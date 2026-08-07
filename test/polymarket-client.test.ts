@@ -551,6 +551,7 @@ describe("authenticated CLOB adapter", () => {
 function approvedLiveProposal(nowMs: number): OrderProposal {
   const intent = intentFixture(nowMs);
   intent.executionMode = "live";
+  intent.sessionId = "fixture-session";
   const proposal = createOrderProposal(intent, riskContextFixture(nowMs));
   return { ...proposal, status: "LOCALLY_APPROVED" };
 }

@@ -13,7 +13,9 @@ import type { ClobClientOptions } from "@polymarket/clob-client-v2";
 import { getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { hashCanonical } from "../src/domain/proposals.js";
+import { RISK_POLICY_VERSION } from "../src/domain/risk-policy.js";
 import type { OrderProposal } from "../src/domain/types.js";
+import { createTradingSession } from "../src/domain/session.js";
 import {
   KEYCHAIN_SERVICE,
   MacOSKeychain,
@@ -268,7 +270,13 @@ describe("LocalApprovalCoordinator", () => {
     const now = { value: 2_000_000_000_000 };
     const database = new TradingDatabase(":memory:");
     try {
-      const proposal = makeProposal(now.value);
+      const session = createTradingSession({
+        executionMode: "live",
+        authorizedBudgetMicros: 1_000_000n,
+        nowMs: now.value
+      });
+      database.saveTradingSession(session);
+      const proposal = makeProposal(now.value, session.id);
       database.stageProposal(proposal);
       const coordinator = new LocalApprovalCoordinator({
         database,
@@ -365,7 +373,13 @@ describe("LocalApprovalCoordinator", () => {
     const nowMs = Date.now();
 
     const first = new TradingDatabase(filename);
-    const proposal = makeProposal(nowMs);
+    const session = createTradingSession({
+      executionMode: "live",
+      authorizedBudgetMicros: 1_000_000n,
+      nowMs: nowMs
+    });
+    first.saveTradingSession(session);
+    const proposal = makeProposal(nowMs, session.id);
     first.stageProposal(proposal);
     const coordinator = new LocalApprovalCoordinator({ database: first });
     coordinator.begin(proposal.id, proposal.hash);
@@ -388,7 +402,13 @@ describe("LocalApprovalCoordinator", () => {
     const orderId = `0x${"f".repeat(64)}`;
 
     const first = new TradingDatabase(filename);
-    const proposal = makeProposal(nowMs);
+    const session = createTradingSession({
+      executionMode: "live",
+      authorizedBudgetMicros: 1_000_000n,
+      nowMs
+    });
+    first.saveTradingSession(session);
+    const proposal = makeProposal(nowMs, session.id);
     first.stageProposal(proposal);
     first.transitionProposal(
       proposal.id,
@@ -511,13 +531,14 @@ process.stdin.on("end", () => {
   });
 });
 
-function makeProposal(nowMs: number): OrderProposal {
+function makeProposal(nowMs: number, sessionId = "session-security-test"): OrderProposal {
   const withoutHash: Omit<OrderProposal, "hash"> = {
     id: "proposal-security-test",
     status: "STAGED",
     createdAtMs: nowMs,
     expiresAtMs: nowMs + 90_000,
     intent: "ENTRY",
+    sessionId,
     executionMode: "live",
     market: {
       conditionId: "condition",
@@ -560,7 +581,7 @@ function makeProposal(nowMs: number): OrderProposal {
     counterThesis: "Test counter-thesis",
     sources: [],
     correlationKey: "security-test",
-    policyVersion: "test"
+    policyVersion: RISK_POLICY_VERSION
   };
   const { status: _status, ...immutableHashMaterial } = withoutHash;
   return {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createOrderProposal } from "../src/domain/proposals.js";
+import { createTradingSession } from "../src/domain/session.js";
 import {
   formatMicros,
   type OrderProposal,
@@ -72,6 +73,13 @@ function liveHarness(includeUserChannel: boolean, nowMs = NOW_MS): {
 
   const intent = intentFixture(NOW_MS);
   intent.executionMode = "live";
+  const session = createTradingSession({
+    executionMode: "live",
+    authorizedBudgetMicros: 10n * 1_000_000n,
+    nowMs: NOW_MS
+  });
+  database.saveTradingSession(session);
+  intent.sessionId = session.id;
   const proposal = createOrderProposal(intent, riskContextFixture(NOW_MS));
   const expiration =
     Math.floor(proposal.createdAtMs / 1_000) + 60 + 15 * 60;

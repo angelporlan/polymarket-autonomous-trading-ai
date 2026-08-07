@@ -999,6 +999,7 @@ function proposalOutput(proposal: OrderProposal): StageOrderOutput {
           : "STAGED",
     executionMode: proposal.executionMode,
     intent: proposal.intent,
+    sessionId: proposal.sessionId,
     createdAt: new Date(proposal.createdAtMs).toISOString(),
     expiresAt: new Date(proposal.expiresAtMs).toISOString(),
     market: marketSnapshotOutput(proposal.market, "unknown", true),

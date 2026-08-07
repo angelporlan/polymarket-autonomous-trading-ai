@@ -537,6 +537,7 @@ function createRawClientDouble(
 function approvedProposal(): OrderProposal {
   const intent = intentFixture(NOW_MS);
   intent.executionMode = "live";
+  intent.sessionId = "fixture-session";
   const proposal = createOrderProposal(intent, riskContextFixture(NOW_MS));
   return { ...proposal, status: "LOCALLY_APPROVED" };
 }

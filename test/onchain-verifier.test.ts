@@ -127,6 +127,7 @@ describe("PolygonReceiptVerifier", () => {
 function liveProposal() {
   const intent = intentFixture(NOW_MS);
   intent.executionMode = "live";
+  intent.sessionId = "fixture-session";
   return createOrderProposal(intent, riskContextFixture(NOW_MS));
 }
 

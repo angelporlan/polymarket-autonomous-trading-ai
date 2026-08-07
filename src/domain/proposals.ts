@@ -37,6 +37,7 @@ export function createOrderProposal(
     createdAtMs: context.nowMs,
     expiresAtMs: context.nowMs + policy.proposalTtlMs,
     intent: intent.intent,
+    sessionId: intent.sessionId ?? null,
     executionMode: intent.executionMode,
     market: intent.market,
     side: intent.side,

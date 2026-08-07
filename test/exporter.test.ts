@@ -10,6 +10,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { exportLedger } from "../src/audit/exporter.js";
 import { createOrderProposal } from "../src/domain/proposals.js";
+import { createTradingSession } from "../src/domain/session.js";
 import type { LocalApproval, OrderProposal } from "../src/domain/types.js";
 import { TradingDatabase } from "../src/storage/database.js";
 import { intentFixture, riskContextFixture } from "./fixtures.js";
@@ -83,6 +84,13 @@ describe("exportLedger", () => {
     const database = new TradingDatabase(":memory:");
     const intent = intentFixture(nowMs);
     intent.executionMode = "live";
+    const session = createTradingSession({
+      executionMode: "live",
+      authorizedBudgetMicros: 5n * 1_000_000n,
+      nowMs
+    });
+    database.saveTradingSession(session);
+    intent.sessionId = session.id;
     const proposal = createOrderProposal(intent, riskContextFixture(nowMs));
     submitProposalWithResponse(database, proposal, "{invalid-json", nowMs);
     const formulaEventHash = database.appendAudit("=SUM(1,1)", null, {
