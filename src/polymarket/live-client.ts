@@ -284,7 +284,7 @@ export class PolymarketLiveClient {
         true
       );
     } catch (error) {
-      process.stderr.write(`[post-order-debug] ${error instanceof Error ? (error as any).stack ?? error.message : JSON.stringify(error)}\n`);
+      process.stderr.write("[polymarket-live] CLOB_ORDER_SUBMISSION_ERROR\n");
       throw toSafeExternalError(error, {
         code: "CLOB_ORDER_SUBMISSION_ERROR",
         service: "clob",
