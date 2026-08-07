@@ -121,7 +121,7 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
     },
     {
       instructions:
-        "Inspect account and market state before staging an order. Staging never submits an order. execute_staged_order only creates a short-lived http://127.0.0.1 approval URL and never signs or submits. A separate local confirmation and runtime policy checks are mandatory before any live submission."
+        "Inspect account, market state, and trading session budget before staging an order. Staging creates an immutable proposal. execute_staged_order submits the proposal autonomously ONLY when an active authorized session with remaining budget exists and all risk policy and live safety checks pass."
     }
   );
 
@@ -237,9 +237,9 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
   server.registerTool(
     "execute_staged_order",
     {
-      title: "Request local order approval",
+      title: "Execute staged order autonomously",
       description:
-        "Create or return an idempotent, short-lived loopback approval URL for the exact proposal ID and hash. This tool never signs or submits an order.",
+        "Execute a staged proposal autonomously. Submits the order to Polymarket CLOB if live safety gates, session budget, and risk policy checks pass. Requires an active authorized trading session.",
       inputSchema: executeStagedOrderInputSchema,
       outputSchema: executeStagedOrderOutputSchema,
       annotations: APPROVAL_ANNOTATIONS

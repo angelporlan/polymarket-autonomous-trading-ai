@@ -409,6 +409,61 @@ export const emergencyStopOutputSchema = z
   })
   .strict();
 
+export const startTradingSessionInputSchema = z
+  .object({
+    executionMode: z.enum(["paper", "live"]).default("paper"),
+    authorizedBudgetPusd: positiveDecimalSchema,
+    ttlHours: z.number().positive().default(8)
+  })
+  .strict();
+
+export const startTradingSessionOutputSchema = z
+  .object({
+    sessionId: identifierSchema,
+    executionMode: z.enum(["paper", "live"]),
+    authorizedBudgetPusd: positiveDecimalSchema,
+    remainingBudgetPusd: positiveDecimalSchema,
+    status: z.enum(["ACTIVE", "EXPIRED", "EXHAUSTED", "CLOSED"]),
+    createdAt: timestampSchema,
+    expiresAt: timestampSchema
+  })
+  .strict();
+
+export const getSessionStatusInputSchema = z
+  .object({
+    executionMode: z.enum(["paper", "live"]).default("paper")
+  })
+  .strict();
+
+export const getSessionStatusOutputSchema = z
+  .object({
+    activeSession: startTradingSessionOutputSchema.nullable(),
+    checkedAt: timestampSchema
+  })
+  .strict();
+
+export const supervisePositionsInputSchema = z.object({}).strict();
+
+export const supervisePositionsOutputSchema = z
+  .object({
+    evaluatedPositionsCount: z.number().int().nonnegative(),
+    actions: z.array(
+      z
+        .object({
+          tokenId: identifierSchema,
+          conditionId: identifierSchema,
+          question: z.string(),
+          shouldExit: z.boolean(),
+          triggerReason: z.string(),
+          explanation: z.string(),
+          recommendedOrderSide: orderSideSchema
+        })
+        .strict()
+    ),
+    evaluatedAt: timestampSchema
+  })
+  .strict();
+
 export type GetAccountStatusInput = z.infer<typeof getAccountStatusInputSchema>;
 export type GetAccountStatusOutput = z.infer<typeof getAccountStatusOutputSchema>;
 export type GetPortfolioInput = z.infer<typeof getPortfolioInputSchema>;
@@ -437,3 +492,9 @@ export type CancelOrderInput = z.infer<typeof cancelOrderInputSchema>;
 export type CancelOrderOutput = z.infer<typeof cancelOrderOutputSchema>;
 export type EmergencyStopInput = z.infer<typeof emergencyStopInputSchema>;
 export type EmergencyStopOutput = z.infer<typeof emergencyStopOutputSchema>;
+export type StartTradingSessionInput = z.infer<typeof startTradingSessionInputSchema>;
+export type StartTradingSessionOutput = z.infer<typeof startTradingSessionOutputSchema>;
+export type GetSessionStatusInput = z.infer<typeof getSessionStatusInputSchema>;
+export type GetSessionStatusOutput = z.infer<typeof getSessionStatusOutputSchema>;
+export type SupervisePositionsInput = z.infer<typeof supervisePositionsInputSchema>;
+export type SupervisePositionsOutput = z.infer<typeof supervisePositionsOutputSchema>;
