@@ -226,11 +226,43 @@ npm run onboard -- import-key
 npm run onboard -- configure
 npm run onboard -- adopt-existing-portfolio --confirm ADOPT_EXISTING_PORTFOLIO
 npm run onboard -- activate-live --confirm ACTIVATE_LIVE
+npm run autonomous:start
 ```
 
 `import-key` abre la interfaz nativa oculta y escribe directamente en el Llavero. `configure` comprueba signer, funder, perfil y tipo de wallet; usa `--confirm-legacy-proxy` solo cuando la comprobación explícita determine que la cuenta existente es el proxy legado tipo 1. `activate-live` seguirá fallando hasta que la puerta paper y el resto de controles estén satisfechos.
 
 Si la cuenta ya tiene posiciones abiertas, `adopt-existing-portfolio` permite establecer un baseline diario verificable sin introducir un saldo manual ni mover fondos. Exige cartera pública consistente, cero actividad desde medianoche de `Europe/Madrid`, cuenta autenticada en modo que permita órdenes, auditoría válida, cooldown inactivo y exposición por debajo del techo fijo. Guarda únicamente un hash de identidad de las posiciones; cualquier cambio externo invalida la adopción. Las posiciones adoptadas sin procedencia local siguen bloqueadas para salidas automáticas hasta que se reconcilien.
+
+### Arranque autónomo persistente
+
+`autonomous:start` es el comando recomendado para iniciar el daemon local. Ejecuta, en una sola operación, estas tareas:
+
+1. Comprueba que live está preparado y calcula la capacidad real disponible.
+2. Reutiliza una sesión o autorización live pendiente que siga vigente; no crea un segundo presupuesto.
+3. Si hace falta, muestra una única ventana nativa para autorizar el importe exacto de la sesión.
+4. Activa la sesión y registra el supervisor `launchd` con lock de instancia única.
+
+```bash
+npm run autonomous:start
+```
+
+Después de `npm run build` también puede ejecutarse directamente:
+
+```bash
+node dist/cli/autonomous-start.js
+```
+
+La duración por defecto es de 8 horas y puede ajustarse entre 1 y 24 horas:
+
+```bash
+npm run autonomous:start -- --ttl-hours 12
+```
+
+El comando imprime la sesión activa, el presupuesto autorizado, el vencimiento y el estado del supervisor. Una sesión activa se reutiliza en ejecuciones posteriores; al caducar, la renovación exige una nueva autorización nativa. No hay confirmaciones por orden. El daemon se detiene de forma segura al expirar la sesión o ante un bloqueo de emergencia.
+
+El supervisor evalúa entradas aproximadamente cada 10 segundos y supervisa las posiciones en el mismo ciclo. No opera por momentum puro: necesita un `ResearchBundle` vigente, verificable y con dos dominios independientes. `autonomous:start` no inventa probabilidades ni acepta saldo manual; si faltan investigación, snapshots o capacidad de riesgo, el ciclo termina sin enviar una orden.
+
+Para calcular el presupuesto live, el proceso usa la cartera pública cuando incluye saldo y, si no lo incluye, consulta de forma autenticada y solo lectura el saldo de garantía del CLOB. Si esa verificación falla, el arranque se bloquea; nunca acepta un saldo introducido manualmente.
 
 Para cerrar live o revisar un incidente:
 

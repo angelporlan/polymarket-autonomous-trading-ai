@@ -136,6 +136,30 @@ export class GuardedLiveTradingAdapter implements LiveTradingPort {
     return social.exists && l2.exists;
   }
 
+  async getVerifiedCollateralBalance(): Promise<bigint> {
+    const client = await this.getOrCreateAuthenticatedClient(
+      "Authorize read-only verification of Polymarket collateral balance"
+    );
+    try {
+      const response = await client.raw.getBalanceAllowance({
+        asset_type: AssetType.COLLATERAL
+      });
+      return parseBaseUnits(response.balance, "balance");
+    } catch (error) {
+      if (error instanceof SafeExternalServiceError) {
+        throw error;
+      }
+      throw new SafeExternalServiceError(
+        "The authenticated collateral balance request failed.",
+        {
+          code: "CLOB_BALANCE_ERROR",
+          service: "clob",
+          retryable: false
+        }
+      );
+    }
+  }
+
   async submitGtd(
     proposal: OrderProposal,
     finalPreflight: () => Promise<void>

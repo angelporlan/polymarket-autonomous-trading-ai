@@ -62,6 +62,18 @@ interface RawClientControl {
 type RawClientDouble = ReturnType<typeof createRawClientDouble>;
 
 describe("guarded live adapter lifecycle", () => {
+  it("reads the authenticated collateral balance without signing", async () => {
+    const harness = createHarness([{}]);
+
+    await expect(
+      harness.adapter.getVerifiedCollateralBalance()
+    ).resolves.toBe(1_000_000_000n);
+    expect(harness.rawClients[0]?.getBalanceAllowance).toHaveBeenCalledWith({
+      asset_type: "COLLATERAL"
+    });
+    harness.adapter.close();
+  });
+
   it("blocks a non-V2 CLOB version before signing", async () => {
     const harness = createHarness(
       [{}],

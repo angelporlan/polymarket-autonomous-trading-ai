@@ -246,6 +246,15 @@ private func authorizeTradingSession(_ payload: Data) throws -> Data {
         throw FixedHelperError(code: .authenticationCancelled)
     }
 
+    // The helper is launched as a short-lived command-line process. Make its
+    // native authorization window visible and frontmost before entering the
+    // modal loop; otherwise launchd/Terminal can leave the prompt behind
+    // another window until the IPC caller times out.
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    setupEditMenuIfNeeded()
+    application.activate(ignoringOtherApps: true)
+
     let amountField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 430, height: 24))
     amountField.placeholderString = "Amount in pUSD (maximum shown below)"
     amountField.isAutomaticTextCompletionEnabled = false
@@ -501,7 +510,9 @@ private func keychainItemExists(service: String, account: String) throws -> Bool
     query[kSecReturnAttributes as String] = true
     query[kSecUseAuthenticationContext as String] = context
 
-    let status = SecItemCopyMatching(query as CFDictionary, nil)
+    var attributes: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &attributes)
+    attributes = nil
     switch status {
     case errSecSuccess, errSecInteractionNotAllowed:
         return true
@@ -510,6 +521,9 @@ private func keychainItemExists(service: String, account: String) throws -> Bool
     case errSecNotAvailable:
         throw FixedHelperError(code: .keychainUnavailable)
     default:
+        // OSStatus is a non-secret diagnostic; keep it on stderr so the
+        // JSON-RPC/pipe response remains protocol-clean.
+        fputs("[keychain-helper] SecItemCopyMatching status: \(status)\n", stderr)
         throw FixedHelperError(code: .internalError)
     }
 }
@@ -519,6 +533,14 @@ private func readProtectedItem(
     account: String,
     reason: String
 ) throws -> Data {
+    // If the item still requires one-time approval, surface the macOS
+    // authorization prompt instead of leaving it behind a terminal/launchd
+    // window until the IPC timeout. Normal unattended reads remain promptless
+    // once the helper has been granted access in Keychain Access.
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    application.activate(ignoringOtherApps: true)
+
     let context = LAContext()
     context.localizedReason = reason
     context.touchIDAuthenticationAllowableReuseDuration = 0

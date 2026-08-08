@@ -484,6 +484,30 @@ export class PolymarketRuntime {
     return tradingSessionOutput(session);
   }
 
+  async authorizeTradingSession(
+    pendingSessionId: string
+  ): Promise<{ pendingSessionId: string; authorizedAmountPusd: string }> {
+    this.requireProfile();
+    if (this.keychain === null) {
+      throw new Error("KEYCHAIN_UNAVAILABLE");
+    }
+    const pending = this.database.getPendingTradingSession(pendingSessionId);
+    if (!pending) {
+      throw new Error("Pending trading session is missing or expired.");
+    }
+    const attestation = await this.keychain.authorizeTradingSession({
+      pendingSessionId: pending.id,
+      executionMode: pending.executionMode,
+      maximumAuthorizableMicros: pending.maximumAuthorizableMicros,
+      expiresAtMs: pending.expiresAtMs
+    });
+    this.database.recordSessionAuthorization(attestation);
+    return {
+      pendingSessionId: pending.id,
+      authorizedAmountPusd: formatMicros(attestation.amountMicros)
+    };
+  }
+
   async getTradingSession(
     input: GetTradingSessionInput
   ): Promise<GetTradingSessionOutput> {
@@ -492,6 +516,30 @@ export class PolymarketRuntime {
     return {
       activeSession: active === null ? null : tradingSessionOutput(active),
       checkedAt: new Date().toISOString()
+    };
+  }
+
+  /**
+   * Returns the current unexpired pending authorization for the requested
+   * mode. The autonomous launcher uses this to resume an interrupted native
+   * prompt without preparing a second budget or changing its limits.
+   */
+  async getPendingTradingSession(input: {
+    executionMode: "live" | "paper";
+  }): Promise<{ pendingSessionId: string; authorized: boolean } | null> {
+    this.requireProfile();
+    const pending = this.database.getPendingTradingSessionForMode(
+      input.executionMode,
+      Date.now()
+    );
+    if (pending === null) {
+      return null;
+    }
+    const authorization = this.database.getSessionAuthorization(pending.id);
+    return {
+      pendingSessionId: pending.id,
+      authorized:
+        authorization !== null && authorization.consumedAtMs === null
     };
   }
 
@@ -828,7 +876,7 @@ export class PolymarketRuntime {
     };
   }
 
-  async close(): Promise<void> {
+  async close(options: { preserveLiveActivation?: boolean } = {}): Promise<void> {
     if (this.closed) {
       return;
     }
@@ -836,7 +884,9 @@ export class PolymarketRuntime {
     // Stop future gates and signing synchronously. The dashboard is then
     // drained so an already accepted callback cannot claim an execution after
     // the final ledger check.
-    this.database.setLiveActivation(false);
+    if (options.preserveLiveActivation !== true) {
+      this.database.setLiveActivation(false);
+    }
     this.liveTrading?.beginShutdown();
     await this.dashboardServer.stop();
 

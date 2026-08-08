@@ -92,6 +92,12 @@ export interface LiveOrderResult {
 
 export interface LiveTradingPort {
   configured(): Promise<boolean>;
+  /**
+   * Read the authenticated collateral balance without signing or submitting
+   * anything. Implementations must fail closed when the CLOB response cannot
+   * be verified.
+   */
+  getVerifiedCollateralBalance?: () => Promise<bigint>;
   submitGtd(
     proposal: OrderProposal,
     finalPreflight: () => Promise<void>

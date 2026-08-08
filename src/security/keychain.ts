@@ -188,23 +188,43 @@ export class MacOSKeychain implements KeychainPort {
           unknown
         >;
         if (
-          candidate.pendingSessionId !== input.pendingSessionId ||
-          candidate.source !== "macos-native-user-presence" ||
-          typeof candidate.amountMicros !== "string" ||
-          !/^\d+$/u.test(candidate.amountMicros) ||
-          BigInt(candidate.amountMicros) <= 0n ||
-          BigInt(candidate.amountMicros) > input.maximumAuthorizableMicros ||
-          typeof candidate.attestationNonce !== "string" ||
-          !/^[a-f0-9]{64}$/u.test(candidate.attestationNonce) ||
-          typeof candidate.confirmedAtMs !== "number" ||
-          !Number.isSafeInteger(candidate.confirmedAtMs) ||
+          typeof candidate.confirmedAtMs === "number" &&
+          Number.isSafeInteger(candidate.confirmedAtMs) &&
           candidate.confirmedAtMs > input.expiresAtMs
         ) {
-          throw new KeychainHelperError("INVALID_SESSION_ATTESTATION");
+          throw new KeychainHelperError("SESSION_AUTHORIZATION_EXPIRED");
+        }
+        if (candidate.pendingSessionId !== input.pendingSessionId) {
+          throw new KeychainHelperError("INVALID_SESSION_PENDING_ID");
+        }
+        if (candidate.source !== "macos-native-user-presence") {
+          throw new KeychainHelperError("INVALID_SESSION_SOURCE");
+        }
+        if (
+          typeof candidate.amountMicros !== "string" ||
+          !/^\d+$/u.test(candidate.amountMicros)
+        ) {
+          throw new KeychainHelperError("INVALID_SESSION_AMOUNT_FORMAT");
+        }
+        const amountMicros = BigInt(candidate.amountMicros);
+        if (amountMicros <= 0n || amountMicros > input.maximumAuthorizableMicros) {
+          throw new KeychainHelperError("INVALID_SESSION_AMOUNT_LIMIT");
+        }
+        if (
+          typeof candidate.attestationNonce !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(candidate.attestationNonce)
+        ) {
+          throw new KeychainHelperError("INVALID_SESSION_NONCE");
+        }
+        if (
+          typeof candidate.confirmedAtMs !== "number" ||
+          !Number.isSafeInteger(candidate.confirmedAtMs)
+        ) {
+          throw new KeychainHelperError("INVALID_SESSION_TIMESTAMP");
         }
         return {
           pendingSessionId: input.pendingSessionId,
-          amountMicros: BigInt(candidate.amountMicros),
+          amountMicros,
           attestationNonce: candidate.attestationNonce,
           attestationSource: "macos-native-user-presence",
           confirmedAtMs: candidate.confirmedAtMs

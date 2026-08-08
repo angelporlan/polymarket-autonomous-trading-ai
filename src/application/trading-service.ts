@@ -679,7 +679,15 @@ export class TradingService {
       }
     }
     if (executionMode === "live" && cashAvailableMicros === null) {
-      throw new Error("LIVE_SESSION_CASH_UNAVAILABLE: real cash could not be verified.");
+      const readVerifiedBalance = this.options.liveTrading?.getVerifiedCollateralBalance;
+      if (readVerifiedBalance === undefined || this.options.liveTrading === undefined) {
+        throw new Error("LIVE_SESSION_CASH_UNAVAILABLE: real cash could not be verified.");
+      }
+      try {
+        cashAvailableMicros = await readVerifiedBalance.call(this.options.liveTrading);
+      } catch {
+        throw new Error("LIVE_SESSION_CASH_UNAVAILABLE: real cash could not be verified.");
+      }
     }
 
     const hardCeilingRemainingMicros = maxRemaining(
