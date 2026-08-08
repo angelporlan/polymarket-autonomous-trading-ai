@@ -187,6 +187,10 @@ export const orderProposalSchema = z
     thesis: z.string().trim().min(20),
     counterThesis: z.string().trim().min(20),
     sources: z.array(evidenceSourceSchema),
+    decisionOwner: z.enum(["daemon", "agent"]).optional(),
+    agentRunId: identifierSchema.nullable().optional(),
+    modelVersion: z.string().trim().min(1).max(200).nullable().optional(),
+    analysisHash: proposalHashSchema.nullable().optional(),
     correlationKey: z.string().trim().min(1).max(200),
     policyVersion: z.string().trim().min(1),
     exitReason: exitReasonSchema.optional()
@@ -434,6 +438,47 @@ export const prepareResearchBundleOutputSchema = z
   })
   .strict();
 
+export const prepareMarketEvidenceInputSchema = z
+  .object({
+    agentRunId: identifierSchema,
+    conditionId: identifierSchema,
+    tokenId: identifierSchema,
+    estimatedProbability: probabilityDecimalSchema,
+    eventVolatilityClass: z.enum(["SLOW", "FAST"]),
+    modelVersion: z.string().trim().min(1).max(200),
+    rationale: z.string().trim().min(20).max(5_000),
+    counterRationale: z.string().trim().min(20).max(5_000)
+  })
+  .strict();
+
+export const marketEvidenceSourceSchema = z
+  .object({
+    origin: z.enum(["CLOB", "GAMMA", "DATA"]),
+    capturedAt: timestampSchema,
+    snapshotHash: proposalHashSchema,
+    payloadHash: proposalHashSchema
+  })
+  .strict();
+
+export const prepareMarketEvidenceOutputSchema = z
+  .object({
+    researchBundleId: identifierSchema,
+    conditionId: identifierSchema,
+    tokenId: identifierSchema,
+    estimatedProbability: probabilityDecimalSchema,
+    eventVolatilityClass: z.enum(["SLOW", "FAST"]),
+    evidenceKind: z.literal("MARKET_DATA"),
+    modelVersion: z.string().trim().min(1),
+    createdAt: timestampSchema,
+    expiresAt: timestampSchema,
+    marketSources: z.array(marketEvidenceSourceSchema).min(2),
+    rationale: z.string().trim().min(20),
+    counterRationale: z.string().trim().min(20),
+    contentHash: proposalHashSchema,
+    analysisHash: proposalHashSchema
+  })
+  .strict();
+
 export const stageOrderInputSchema = z
   .object({
     executionMode: z.enum(["paper", "live"]).default("paper"),
@@ -449,6 +494,10 @@ export const stageOrderInputSchema = z
     thesis: z.string().trim().min(20).max(5_000),
     counterThesis: z.string().trim().min(20).max(5_000),
     sources: z.array(evidenceSourceSchema).max(20),
+    decisionOwner: z.enum(["daemon", "agent"]).optional(),
+    agentRunId: identifierSchema.optional(),
+    modelVersion: z.string().trim().min(1).max(200).optional(),
+    analysisHash: proposalHashSchema.optional(),
     exitReason: exitReasonSchema.optional(),
     confirmsNoConfidentialInformation: z.literal(true),
     confirmsNoOutcomeInfluence: z.literal(true)
@@ -634,6 +683,52 @@ export const endTradingSessionOutputSchema = z
   })
   .strict();
 
+export const startAgentRunInputSchema = z
+  .object({
+    host: z.string().trim().min(1).max(200),
+    model: z.string().trim().min(1).max(200)
+  })
+  .strict();
+
+export const agentRunOutputSchema = z
+  .object({
+    agentRunId: identifierSchema,
+    host: z.string().trim().min(1),
+    model: z.string().trim().min(1),
+    status: z.enum(["ACTIVE", "STOPPING", "STOPPED", "EXPIRED", "LOCKED"]),
+    startedAt: timestampSchema,
+    lastHeartbeatAt: timestampSchema,
+    leaseExpiresAt: timestampSchema,
+    stoppedAt: timestampSchema.nullable(),
+    stopReason: z.string().nullable()
+  })
+  .strict();
+
+export const startAgentRunOutputSchema = agentRunOutputSchema;
+export const heartbeatAgentRunInputSchema = z
+  .object({ agentRunId: identifierSchema })
+  .strict();
+export const heartbeatAgentRunOutputSchema = agentRunOutputSchema;
+export const getAgentRunInputSchema = z.object({}).strict();
+export const getAgentRunOutputSchema = z
+  .object({
+    agentRun: agentRunOutputSchema.nullable(),
+    checkedAt: timestampSchema
+  })
+  .strict();
+export const stopAgentRunInputSchema = z
+  .object({
+    agentRunId: identifierSchema,
+    reason: z.string().trim().min(1).max(500).default("USER_REQUESTED_STOP")
+  })
+  .strict();
+export const stopAgentRunOutputSchema = z
+  .object({
+    agentRun: agentRunOutputSchema,
+    emergencyStop: emergencyStopOutputSchema
+  })
+  .strict();
+
 export const supervisePositionsInputSchema = z.object({}).strict();
 
 export const supervisePositionsOutputSchema = z
@@ -710,6 +805,12 @@ export type PrepareResearchBundleInput = z.infer<
 export type PrepareResearchBundleOutput = z.infer<
   typeof prepareResearchBundleOutputSchema
 >;
+export type PrepareMarketEvidenceInput = z.infer<
+  typeof prepareMarketEvidenceInputSchema
+>;
+export type PrepareMarketEvidenceOutput = z.infer<
+  typeof prepareMarketEvidenceOutputSchema
+>;
 export type StageOrderInput = z.infer<typeof stageOrderInputSchema>;
 export type StageOrderOutput = z.infer<typeof stageOrderOutputSchema>;
 export type ExecuteStagedOrderInput = z.infer<
@@ -730,6 +831,14 @@ export type GetTradingSessionInput = z.infer<typeof getTradingSessionInputSchema
 export type GetTradingSessionOutput = z.infer<typeof getTradingSessionOutputSchema>;
 export type EndTradingSessionInput = z.infer<typeof endTradingSessionInputSchema>;
 export type EndTradingSessionOutput = z.infer<typeof endTradingSessionOutputSchema>;
+export type StartAgentRunInput = z.infer<typeof startAgentRunInputSchema>;
+export type StartAgentRunOutput = z.infer<typeof startAgentRunOutputSchema>;
+export type HeartbeatAgentRunInput = z.infer<typeof heartbeatAgentRunInputSchema>;
+export type HeartbeatAgentRunOutput = z.infer<typeof heartbeatAgentRunOutputSchema>;
+export type GetAgentRunInput = z.infer<typeof getAgentRunInputSchema>;
+export type GetAgentRunOutput = z.infer<typeof getAgentRunOutputSchema>;
+export type StopAgentRunInput = z.infer<typeof stopAgentRunInputSchema>;
+export type StopAgentRunOutput = z.infer<typeof stopAgentRunOutputSchema>;
 export type SupervisePositionsInput = z.infer<typeof supervisePositionsInputSchema>;
 export type SupervisePositionsOutput = z.infer<typeof supervisePositionsOutputSchema>;
 export type ImportLegacyPositionInput = z.infer<typeof importLegacyPositionInputSchema>;

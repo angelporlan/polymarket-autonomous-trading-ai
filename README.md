@@ -23,13 +23,18 @@ El servidor expone por `stdio` estas herramientas MCP:
 | `execute_staged_order` | Ejecuta de forma autónoma una propuesta staged si cumple las reglas de riesgo, presupuesto de sesión y barreras live. |
 | `cancel_order` | Solicita cancelar una orden concreta; no declara el estado terminal sin conciliación. |
 | `emergency_stop` | Bloquea la operativa y solicita cancelar todas las órdenes conocidas. Exige `CANCEL_ALL_AND_LOCK`. |
+| `prepare_market_evidence` | Captura CLOB/Gamma frescos como evidencia de dos orígenes y con hashes; no usa noticias. |
+| `start_agent_run` | Adquiere el único lease corto `agent-supervised` tras autorizar live. |
+| `heartbeat_agent_run` | Renueva el lease mientras la conversación sigue activa. |
+| `get_agent_run` | Consulta el propietario y la caducidad del lease. |
+| `stop_agent_run` | Detiene el lease, activa emergency stop y solicita cancelación de mejor esfuerzo. |
 
 No hay herramientas MCP para leer secretos, firmar mensajes arbitrarios, depositar, retirar, cambiar allowances, subir capital o relajar límites.
 
 ## Flujo de seguridad
 
 ```text
-Codex / Antigravity analiza la oportunidad y valida al menos 2 fuentes independientes
+Codex / Antigravity / Claude Code analiza la oportunidad y valida dos orígenes de datos de mercado independientes (CLOB y Gamma)
     ↓
 Se verifica sesión activa de trading con presupuesto pUSD autorizado
     ↓
@@ -261,6 +266,8 @@ npm run autonomous:start -- --ttl-hours 12
 El comando imprime la sesión activa, el presupuesto autorizado, el vencimiento y el estado del supervisor. Una sesión activa se reutiliza en ejecuciones posteriores; al caducar, la renovación exige una nueva autorización nativa. No hay confirmaciones por orden. El daemon se detiene de forma segura al expirar la sesión o ante un bloqueo de emergencia.
 
 El supervisor evalúa entradas aproximadamente cada 10 segundos y supervisa las posiciones en el mismo ciclo. No opera por momentum puro: necesita un `ResearchBundle` vigente, verificable y con dos dominios independientes. `autonomous:start` no inventa probabilidades ni acepta saldo manual; si faltan investigación, snapshots o capacidad de riesgo, el ciclo termina sin enviar una orden.
+
+Para que una IA anfitriona decida las entradas durante una conversación activa existe el contrato portable [`docs/AI_AUTONOMOUS_TRADING.md`](docs/AI_AUTONOMOUS_TRADING.md). La IA adquiere `start_agent_run`, renueva el heartbeat y usa evidencia de mercado seguida exactamente de `stage_order → execute_staged_order`. Mientras el lease está activo el daemon no abre entradas, aunque sigue conciliando y supervisando salidas. Stop, `SIGTERM`, cierre de conversación o caducidad del lease bloquean live y dejan la sesión reconciliable.
 
 Para calcular el presupuesto live, el proceso usa la cartera pública cuando incluye saldo y, si no lo incluye, consulta de forma autenticada y solo lectura el saldo de garantía del CLOB. Si esa verificación falla, el arranque se bloquea; nunca acepta un saldo introducido manualmente.
 

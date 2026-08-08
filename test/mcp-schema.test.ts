@@ -5,7 +5,10 @@ import {
   createMcpServer,
   type McpToolDependencies
 } from "../src/mcp/server.js";
-import { stageOrderInputSchema } from "../src/mcp/schemas.js";
+import {
+  prepareMarketEvidenceInputSchema,
+  stageOrderInputSchema
+} from "../src/mcp/schemas.js";
 
 const proposalId = "00000000-0000-4000-8000-000000000001";
 const proposalHash = "a".repeat(64);
@@ -137,6 +140,11 @@ describe("Polymarket MCP contract", () => {
         "supervise_positions",
         "import_legacy_position",
         "prepare_research_bundle",
+        "prepare_market_evidence",
+        "start_agent_run",
+        "heartbeat_agent_run",
+        "get_agent_run",
+        "stop_agent_run",
         "stage_order",
         "execute_staged_order",
         "cancel_order",
@@ -151,6 +159,26 @@ describe("Polymarket MCP contract", () => {
       await client.close();
       await server.close();
     }
+  });
+
+  it("requires an active agent identity for market-only evidence", () => {
+    const valid = prepareMarketEvidenceInputSchema.safeParse({
+      agentRunId: "agent_test",
+      conditionId: "condition-1",
+      tokenId: "token-1",
+      estimatedProbability: "0.55",
+      eventVolatilityClass: "SLOW",
+      modelVersion: "market-edge-v1",
+      rationale: "The current book and market metadata support this probability estimate.",
+      counterRationale: "The spread, liquidity, and resolution conditions could invalidate the estimate."
+    });
+    expect(valid.success).toBe(true);
+    expect(
+      prepareMarketEvidenceInputSchema.safeParse({
+        ...(valid.success ? valid.data : {}),
+        agentRunId: undefined
+      }).success
+    ).toBe(false);
   });
 
   it("execute_staged_order executes proposal autonomously subject to session budget and risk checks", async () => {

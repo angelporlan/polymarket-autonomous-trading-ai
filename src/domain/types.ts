@@ -4,6 +4,8 @@ export type MarketCategory = "politics" | "economics" | "technology";
 export type OrderSide = "BUY" | "SELL";
 export type ExecutionMode = "paper" | "live";
 export type OrderIntentType = "ENTRY" | "EXIT";
+export type AgentRunStatus = "ACTIVE" | "STOPPING" | "STOPPED" | "EXPIRED" | "LOCKED";
+export type DecisionOwner = "daemon" | "agent";
 export type ExitReason =
   | "STOP_LOSS_TRIGGERED"
   | "TAKE_PROFIT_TRIGGERED"
@@ -93,6 +95,30 @@ export interface ResearchBundle {
   rationale: string;
   counterRationale: string;
   contentHash: string;
+  /** Market-only evidence is deliberately distinct from external research. */
+  evidenceKind?: "EXTERNAL" | "MARKET_DATA";
+  marketSources?: MarketDataEvidenceSource[];
+  modelVersion?: string;
+  analysisHash?: string;
+}
+
+export interface MarketDataEvidenceSource {
+  origin: "CLOB" | "GAMMA" | "DATA";
+  capturedAtMs: number;
+  snapshotHash: string;
+  payloadHash: string;
+}
+
+export interface AgentRun {
+  agentRunId: string;
+  host: string;
+  model: string;
+  status: AgentRunStatus;
+  startedAtMs: number;
+  lastHeartbeatAtMs: number;
+  leaseExpiresAtMs: number;
+  stoppedAtMs: number | null;
+  stopReason: string | null;
 }
 
 export interface OrderIntent {
@@ -109,6 +135,10 @@ export interface OrderIntent {
   counterThesis: string;
   sources: EvidenceSource[];
   correlationKey: string;
+  decisionOwner?: DecisionOwner;
+  agentRunId?: string | null;
+  modelVersion?: string | null;
+  analysisHash?: string | null;
   exitReason?: ExitReason;
 }
 
@@ -185,6 +215,10 @@ export interface OrderProposal {
   sources: EvidenceSource[];
   correlationKey: string;
   policyVersion: string;
+  decisionOwner?: DecisionOwner;
+  agentRunId?: string | null;
+  modelVersion?: string | null;
+  analysisHash?: string | null;
   exitReason?: ExitReason;
 }
 

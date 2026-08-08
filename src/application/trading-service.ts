@@ -3,6 +3,7 @@ import {
   ProposalRejectedError,
   createOrderProposal,
   hashCanonical,
+  hashMarketSnapshot,
   verifyProposalHash
 } from "../domain/proposals.js";
 import {
@@ -325,6 +326,19 @@ export class TradingService {
     }>;
   }> {
     const nowMs = this.now();
+    if (executionMode === "live") {
+      const agentRun = this.options.database.getAgentRun(nowMs);
+      if (agentRun?.status === "ACTIVE") {
+        // The agent lease owns entries exclusively. The daemon continues exits.
+        return {
+          evaluatedCandidatesCount: 0,
+          stagedCount: 0,
+          executedCount: 0,
+          skippedCount: 1,
+          decisions: []
+        };
+      }
+    }
     const session = this.options.database.getActiveTradingSession(executionMode, nowMs);
     if (session === null) {
       return {
@@ -445,7 +459,8 @@ export class TradingService {
               executableSnapshot.conditionId,
               executableSnapshot.tokenId,
               decision.estimatedProbabilityMicros ?? -1n,
-              this.now()
+              this.now(),
+              executableSnapshot
             )) {
               const duplicateEntry = this.options.database.listProposals().some(
                 (proposal) =>
@@ -731,6 +746,32 @@ export class TradingService {
   async stageOrder(input: StageOrderInput): Promise<StageOrderResult> {
     requireResearchFields(input, this.now());
 
+    const nowMs = this.now();
+    const activeAgentRun = this.options.database.getAgentRun(nowMs);
+    if (input.executionMode === "live" && input.intent === "ENTRY") {
+      if (activeAgentRun?.status === "ACTIVE") {
+        if (
+          input.decisionOwner !== "agent" ||
+          input.agentRunId !== activeAgentRun.agentRunId ||
+          !this.options.database.isAgentRunActive(input.agentRunId, nowMs)
+        ) {
+          throw new ProposalRejectedError([
+            {
+              code: "SESSION_INACTIVE",
+              message: "An active agent lease owns live entries; the proposal must identify that lease."
+            }
+          ]);
+        }
+      } else if (input.decisionOwner === "agent" || input.agentRunId !== undefined) {
+        throw new ProposalRejectedError([
+          {
+            code: "SESSION_INACTIVE",
+            message: "The agent lease is missing or expired; new agent entries are blocked."
+          }
+        ]);
+      }
+    }
+
     const activeSession = this.options.database.getActiveTradingSession(input.executionMode, this.now());
     if (!activeSession && (input.executionMode === "paper" || input.intent === "ENTRY")) {
       throw new ProposalRejectedError([
@@ -778,7 +819,8 @@ export class TradingService {
         snapshot.conditionId,
         snapshot.tokenId,
         estimatedProbabilityMicros,
-        this.now()
+        this.now(),
+        snapshot
       )
     ) {
       throw new ProposalRejectedError([
@@ -788,6 +830,22 @@ export class TradingService {
             "Live ENTRY orders require a current verified research bundle matching the market and probability."
         }
       ]);
+    }
+    if (input.executionMode === "live" && input.intent === "ENTRY" && input.decisionOwner === "agent") {
+      if (
+        researchBundle?.evidenceKind !== "MARKET_DATA" ||
+        researchBundle.analysisHash === undefined ||
+        researchBundle.modelVersion === undefined ||
+        input.analysisHash !== researchBundle.analysisHash ||
+        input.modelVersion !== researchBundle.modelVersion
+      ) {
+        throw new ProposalRejectedError([
+          {
+            code: "SOURCE_VALIDATION_FAILED",
+            message: "Agent entries must bind the exact market evidence analysis hash and model version."
+          }
+        ]);
+      }
     }
     const correlationKey = canonicalCorrelationKey(snapshot);
     const context = await this.options.riskContexts.forOrder(
@@ -812,6 +870,10 @@ export class TradingService {
         ? evidenceSourcesFromResearchBundle(researchBundle)
         : input.sources,
       correlationKey,
+      decisionOwner: input.decisionOwner ?? "daemon",
+      ...(input.agentRunId === undefined ? {} : { agentRunId: input.agentRunId }),
+      ...(input.modelVersion === undefined ? {} : { modelVersion: input.modelVersion }),
+      ...(input.analysisHash === undefined ? {} : { analysisHash: input.analysisHash }),
       ...(input.exitReason === undefined
         ? {}
         : { exitReason: input.exitReason })
@@ -905,6 +967,20 @@ export class TradingService {
     if (proposal.intent === "ENTRY" && !activeSession) {
       throw new Error("LIVE_AUTONOMY_NOT_READY: No active authorized live trading session found.");
     }
+    if (proposal.intent === "ENTRY") {
+      const activeAgentRun = this.options.database.getAgentRun(nowMs);
+      if (proposal.decisionOwner === "agent") {
+        if (
+          proposal.agentRunId === undefined ||
+          activeAgentRun?.status !== "ACTIVE" ||
+          activeAgentRun.agentRunId !== proposal.agentRunId
+        ) {
+          throw new Error("AGENT_RUN_NOT_ACTIVE: Agent lease expired or no longer owns entries.");
+        }
+      } else if (activeAgentRun?.status === "ACTIVE") {
+        throw new Error("AGENT_RUN_OWNS_ENTRIES: Deterministic daemon entry is paused while an agent lease is active.");
+      }
+    }
 
     try {
       await this.assertLiveGates(proposal.intent);
@@ -914,7 +990,8 @@ export class TradingService {
         proposal.id,
         proposal.hash,
         proposal.intent === "ENTRY" ? activeSession?.id ?? null : null,
-        nowMs
+        nowMs,
+        proposal.agentRunId ?? null
       );
 
       if (!claimed) {
@@ -1893,7 +1970,8 @@ export class TradingService {
           proposal.market.conditionId,
           proposal.market.tokenId,
           proposal.estimatedProbabilityMicros,
-          this.now()
+          this.now(),
+          proposal.market
         )
       ) {
         throw new Error("RESEARCH_BUNDLE_INVALID");
@@ -2006,7 +2084,8 @@ function isResearchBundleUsable(
   conditionId: string,
   tokenId: string,
   estimatedProbabilityMicros: bigint,
-  nowMs: number
+  nowMs: number,
+  snapshot?: MarketSnapshot
 ): bundle is ResearchBundle {
   if (
     bundle === null ||
@@ -2016,6 +2095,34 @@ function isResearchBundleUsable(
     bundle.estimatedProbabilityMicros !== estimatedProbabilityMicros
   ) {
     return false;
+  }
+  if (bundle.evidenceKind === "MARKET_DATA") {
+    if (
+      bundle.marketSources === undefined ||
+      bundle.marketSources.length < 2 ||
+      new Set(bundle.marketSources.map((source) => source.origin)).size < 2 ||
+      bundle.marketSources.some(
+        (source) =>
+          !["CLOB", "GAMMA", "DATA"].includes(source.origin) ||
+          !Number.isSafeInteger(source.capturedAtMs) ||
+          source.capturedAtMs > nowMs + 60_000 ||
+          nowMs - source.capturedAtMs > 5_000 ||
+          !/^[a-f0-9]{64}$/u.test(source.snapshotHash) ||
+          !/^[a-f0-9]{64}$/u.test(source.payloadHash)
+      ) ||
+      (snapshot !== undefined &&
+        bundle.marketSources.some(
+          (source) => source.snapshotHash !== hashMarketSnapshot(snapshot)
+        )) ||
+      bundle.sources.length !== 0 ||
+      bundle.modelVersion === undefined ||
+      bundle.analysisHash === undefined ||
+      !/^[a-f0-9]{64}$/u.test(bundle.analysisHash)
+    ) {
+      return false;
+    }
+    const { contentHash: _marketContentHash, ...marketContent } = bundle;
+    return hashCanonical(marketContent) === bundle.contentHash;
   }
   const maxAgeMs =
     bundle.eventVolatilityClass === "FAST"
@@ -2054,6 +2161,20 @@ function isResearchBundleUsable(
 function evidenceSourcesFromResearchBundle(
   bundle: ResearchBundle
 ): StageOrderInput["sources"] {
+  if (bundle.evidenceKind === "MARKET_DATA" && bundle.marketSources !== undefined) {
+    return bundle.marketSources.map((source) => ({
+      url:
+        source.origin === "CLOB"
+          ? "https://clob.polymarket.com"
+          : source.origin === "GAMMA"
+            ? "https://gamma-api.polymarket.com"
+            : "https://data-api.polymarket.com",
+      title: `${source.origin} market snapshot`,
+      publishedAt: null,
+      retrievedAt: new Date(source.capturedAtMs).toISOString(),
+      primary: source.origin === "CLOB"
+    }));
+  }
   return bundle.sources.map((source, index) => ({
     url: source.finalUrl,
     title: source.title,

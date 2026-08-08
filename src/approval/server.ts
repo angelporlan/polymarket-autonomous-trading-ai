@@ -119,6 +119,7 @@ export class DashboardHttpServer {
       this.options.database.getLatestPaperReconciliationCheckpoint();
     const cooldown = this.options.database.getCooldown();
     const supervisor = this.options.database.getSupervisorHeartbeat();
+    const agentRun = this.options.database.getAgentRun(nowMs);
     const openPositions = positions.filter(
       (position) => position.exitState !== "CLOSED" && position.sharesMicros > 0n
     );
@@ -130,6 +131,19 @@ export class DashboardHttpServer {
       status: emergency.active ? "EMERGENCY_STOPPED" : activation.active ? "LIVE_ACTIVE" : "READ_ONLY",
       emergencyStop: emergency,
       liveActivation: activation,
+      agentRun: agentRun
+        ? {
+            agentRunId: agentRun.agentRunId,
+            host: agentRun.host,
+            model: agentRun.model,
+            status: agentRun.status,
+            startedAt: new Date(agentRun.startedAtMs).toISOString(),
+            lastHeartbeatAt: new Date(agentRun.lastHeartbeatAtMs).toISOString(),
+            leaseExpiresAt: new Date(agentRun.leaseExpiresAtMs).toISOString(),
+            stoppedAt: toIsoOrNull(agentRun.stoppedAtMs),
+            stopReason: agentRun.stopReason
+          }
+        : null,
       activeSessions: {
         paper: paperSession
           ? {
@@ -174,6 +188,8 @@ export class DashboardHttpServer {
         createdAt: new Date(bundle.createdAtMs).toISOString(),
         expiresAt: new Date(bundle.expiresAtMs).toISOString(),
         sourceCount: bundle.sources.length,
+        evidenceKind: bundle.evidenceKind ?? "EXTERNAL",
+        marketSourceCount: bundle.marketSources?.length ?? 0,
         contentHash: bundle.contentHash
       })),
       orders: proposals.map((proposal) => {

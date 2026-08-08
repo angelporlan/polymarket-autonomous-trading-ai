@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
@@ -11,7 +11,8 @@ import type {
   ProposalStatus,
   ResearchBundle,
   LegacyImportReport,
-  MarketSnapshot
+  MarketSnapshot,
+  AgentRun
 } from "../domain/types.js";
 import {
   createTradingSession,
@@ -95,6 +96,7 @@ export interface LivePortfolioAdoptionRecord {
 }
 
 const AUDIT_RECONCILIATION_EVENT = "AUDIT_CHAIN_RECONCILIATED";
+export const AGENT_RUN_LEASE_MS = 30_000;
 
 export class TradingDatabase {
   readonly db: DatabaseSync;
@@ -129,6 +131,243 @@ export class TradingDatabase {
 
   close(): void {
     this.db.close();
+  }
+
+  /** Acquire the single persistent owner lease for agent-supervised entries. */
+  startAgentRun(input: {
+    host: string;
+    model: string;
+    nowMs?: number;
+  }): AgentRun {
+    const nowMs = input.nowMs ?? Date.now();
+    const host = input.host.trim();
+    const model = input.model.trim();
+    if (host.length === 0 || host.length > 200 || model.length === 0 || model.length > 200) {
+      throw new Error("INVALID_AGENT_RUN_METADATA");
+    }
+    this.beginImmediate();
+    try {
+      const activeProposalRows = this.db.prepare(
+        `SELECT payload_json FROM proposals
+         WHERE status IN ('STAGED','EXECUTING','SUBMITTED')`
+      ).all() as unknown as ProposalRow[];
+      if (activeProposalRows.some((row) => {
+        const proposal = parseWithBigInts<OrderProposal>(row.payload_json);
+        return proposal.executionMode === "live" && proposal.intent === "ENTRY" && proposal.decisionOwner !== "agent";
+      })) {
+        this.rollbackTransaction();
+        throw new Error("DAEMON_ENTRY_ACTIVE");
+      }
+      const rows = this.db.prepare(
+        "SELECT payload_json FROM agent_runs WHERE status IN ('ACTIVE','STOPPING') ORDER BY started_at_ms DESC"
+      ).all() as unknown as ProposalRow[];
+      for (const row of rows) {
+        const existing = parseWithBigInts<AgentRun>(row.payload_json);
+        if (existing.status === "ACTIVE" && existing.leaseExpiresAtMs > nowMs) {
+          this.rollbackTransaction();
+          throw new Error("AGENT_RUN_ALREADY_ACTIVE");
+        }
+        if (existing.status === "ACTIVE") {
+          const expired: AgentRun = {
+            ...existing,
+            status: "EXPIRED",
+            stoppedAtMs: nowMs,
+            stopReason: "AGENT_LEASE_EXPIRED"
+          };
+          this.updateAgentRunRow(expired, nowMs);
+          this.appendAgentRunEvent(expired.agentRunId, "EXPIRED", {
+            reason: expired.stopReason,
+            atMs: nowMs
+          });
+          this.lockInTransaction("AGENT_RUN_EXPIRED", nowMs);
+          this.appendAudit("AGENT_RUN_START_BLOCKED", expired.agentRunId, {
+            reason: "AGENT_RUN_EXPIRED",
+            atMs: nowMs
+          });
+          this.commitTransaction();
+          throw new Error("AGENT_RUN_EXPIRED_LOCKED");
+        }
+      }
+      const run: AgentRun = {
+        agentRunId: `agent_${randomUUID()}`,
+        host,
+        model,
+        status: "ACTIVE",
+        startedAtMs: nowMs,
+        lastHeartbeatAtMs: nowMs,
+        leaseExpiresAtMs: nowMs + AGENT_RUN_LEASE_MS,
+        stoppedAtMs: null,
+        stopReason: null
+      };
+      this.db.prepare(
+        `INSERT INTO agent_runs
+          (agent_run_id, status, started_at_ms, last_heartbeat_at_ms, lease_expires_at_ms, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(
+        run.agentRunId,
+        run.status,
+        run.startedAtMs,
+        run.lastHeartbeatAtMs,
+        run.leaseExpiresAtMs,
+        stringifyWithBigInts(run)
+      );
+      this.appendAgentRunEvent(run.agentRunId, "STARTED", {
+        host: run.host,
+        model: run.model,
+        startedAtMs: nowMs
+      });
+      this.appendAudit("AGENT_RUN_STARTED", run.agentRunId, {
+        host: run.host,
+        model: run.model,
+        leaseExpiresAtMs: run.leaseExpiresAtMs
+      });
+      this.commitTransaction();
+      return run;
+    } catch (error) {
+      if (this.transactionActive) this.rollbackTransaction();
+      throw error;
+    }
+  }
+
+  heartbeatAgentRun(agentRunId: string, nowMs = Date.now()): AgentRun {
+    this.beginImmediate();
+    try {
+      const run = this.readAgentRun(agentRunId);
+      if (run === null || run.status !== "ACTIVE" || run.leaseExpiresAtMs <= nowMs) {
+        if (run?.status === "ACTIVE" && run.leaseExpiresAtMs <= nowMs) {
+          const expired = { ...run, status: "EXPIRED" as const, stoppedAtMs: nowMs, stopReason: "AGENT_LEASE_EXPIRED" };
+          this.updateAgentRunRow(expired, nowMs);
+          this.appendAgentRunEvent(agentRunId, "EXPIRED", { reason: expired.stopReason, atMs: nowMs });
+          this.appendAudit("AGENT_RUN_EXPIRED", agentRunId, { reason: expired.stopReason, atMs: nowMs });
+          this.lockInTransaction("AGENT_RUN_EXPIRED", nowMs);
+          this.commitTransaction();
+          throw new Error("AGENT_RUN_NOT_ACTIVE");
+        }
+        this.rollbackTransaction();
+        throw new Error("AGENT_RUN_NOT_ACTIVE");
+      }
+      const updated: AgentRun = {
+        ...run,
+        lastHeartbeatAtMs: nowMs,
+        leaseExpiresAtMs: nowMs + AGENT_RUN_LEASE_MS
+      };
+      this.updateAgentRunRow(updated, nowMs);
+      this.appendAgentRunEvent(agentRunId, "HEARTBEAT", {
+        lastHeartbeatAtMs: nowMs,
+        leaseExpiresAtMs: updated.leaseExpiresAtMs
+      });
+      this.appendAudit("AGENT_RUN_HEARTBEAT", agentRunId, {
+        lastHeartbeatAtMs: nowMs,
+        leaseExpiresAtMs: updated.leaseExpiresAtMs
+      });
+      this.commitTransaction();
+      return updated;
+    } catch (error) {
+      if (this.transactionActive) this.rollbackTransaction();
+      throw error;
+    }
+  }
+
+  getAgentRun(nowMs = Date.now()): AgentRun | null {
+    const row = this.db.prepare(
+      "SELECT payload_json FROM agent_runs ORDER BY started_at_ms DESC LIMIT 1"
+    ).get() as ProposalRow | undefined;
+    if (row === undefined) return null;
+    const run = parseWithBigInts<AgentRun>(row.payload_json);
+    if (run.status === "ACTIVE" && run.leaseExpiresAtMs <= nowMs) {
+      this.expireAgentRun(run.agentRunId, nowMs);
+      return this.readAgentRun(run.agentRunId);
+    }
+    return run;
+  }
+
+  stopAgentRun(agentRunId: string, reason: string, nowMs = Date.now()): AgentRun {
+    const boundedReason = reason.trim().slice(0, 500) || "USER_REQUESTED_STOP";
+    this.beginImmediate();
+    try {
+      const run = this.readAgentRun(agentRunId);
+      if (run === null) {
+        this.rollbackTransaction();
+        throw new Error("AGENT_RUN_NOT_FOUND");
+      }
+      if (run.status === "STOPPED" || run.status === "EXPIRED" || run.status === "LOCKED") {
+        this.commitTransaction();
+        return run;
+      }
+      const stopped: AgentRun = {
+        ...run,
+        status: "STOPPED",
+        stoppedAtMs: nowMs,
+        stopReason: boundedReason,
+        leaseExpiresAtMs: nowMs
+      };
+      this.updateAgentRunRow(stopped, nowMs);
+      this.appendAgentRunEvent(agentRunId, "STOPPED", {
+        reason: boundedReason,
+        stoppedAtMs: nowMs
+      });
+      this.appendAudit("AGENT_RUN_STOPPED", agentRunId, { reason: boundedReason, stoppedAtMs: nowMs });
+      this.commitTransaction();
+      return stopped;
+    } catch (error) {
+      if (this.transactionActive) this.rollbackTransaction();
+      throw error;
+    }
+  }
+
+  isAgentRunActive(agentRunId: string | null | undefined, nowMs = Date.now()): boolean {
+    if (!agentRunId) return false;
+    const run = this.getAgentRun(nowMs);
+    return run?.agentRunId === agentRunId && run.status === "ACTIVE" && run.leaseExpiresAtMs > nowMs;
+  }
+
+  private readAgentRun(agentRunId: string): AgentRun | null {
+    const row = this.db.prepare(
+      "SELECT payload_json FROM agent_runs WHERE agent_run_id = ?"
+    ).get(agentRunId) as ProposalRow | undefined;
+    return row ? parseWithBigInts<AgentRun>(row.payload_json) : null;
+  }
+
+  private updateAgentRunRow(run: AgentRun, nowMs: number): void {
+    this.db.prepare(
+      `UPDATE agent_runs
+       SET status = ?, last_heartbeat_at_ms = ?, lease_expires_at_ms = ?, payload_json = ?, updated_at_ms = ?
+       WHERE agent_run_id = ?`
+    ).run(run.status, run.lastHeartbeatAtMs, run.leaseExpiresAtMs, stringifyWithBigInts(run), nowMs, run.agentRunId);
+  }
+
+  private appendAgentRunEvent(agentRunId: string, eventType: string, payload: unknown): void {
+    this.db.prepare(
+      `INSERT INTO agent_run_events (agent_run_id, event_type, created_at_ms, payload_json)
+       VALUES (?, ?, ?, ?)`
+    ).run(agentRunId, eventType, Date.now(), stringifyWithBigInts(payload));
+  }
+
+  private expireAgentRun(agentRunId: string, nowMs: number): void {
+    this.beginImmediate();
+    try {
+      const run = this.readAgentRun(agentRunId);
+      if (run?.status === "ACTIVE" && run.leaseExpiresAtMs <= nowMs) {
+        const expired: AgentRun = { ...run, status: "EXPIRED", stoppedAtMs: nowMs, stopReason: "AGENT_LEASE_EXPIRED" };
+        this.updateAgentRunRow(expired, nowMs);
+        this.appendAgentRunEvent(agentRunId, "EXPIRED", { reason: expired.stopReason, atMs: nowMs });
+        this.appendAudit("AGENT_RUN_EXPIRED", agentRunId, { reason: expired.stopReason, atMs: nowMs });
+        this.lockInTransaction("AGENT_RUN_EXPIRED", nowMs);
+      }
+      this.commitTransaction();
+    } catch (error) {
+      if (this.transactionActive) this.rollbackTransaction();
+      throw error;
+    }
+  }
+
+  private lockInTransaction(reason: string, nowMs: number): void {
+    this.setState(
+      "emergency_stop",
+      stringifyWithBigInts({ active: true, reason, updatedAtMs: nowMs }),
+      nowMs
+    );
+    this.appendAudit("EMERGENCY_STOP_SET", null, { reason, updatedAtMs: nowMs });
   }
 
   stageProposal(
@@ -231,6 +470,10 @@ export class TradingDatabase {
         proposalId: proposal.id,
         proposalHash: proposal.hash,
         expiresAtMs: proposal.expiresAtMs,
+        decisionOwner: proposal.decisionOwner ?? "daemon",
+        agentRunId: proposal.agentRunId ?? null,
+        modelVersion: proposal.modelVersion ?? null,
+        analysisHash: proposal.analysisHash ?? null,
         ...(proposal.intent === "EXIT"
           ? { reservedExitSharesMicros: proposal.sharesMicros }
           : {})
@@ -1717,7 +1960,8 @@ export class TradingDatabase {
     proposalId: string,
     proposalHash: string,
     sessionId: string | null,
-    nowMs: number
+    nowMs: number,
+    agentRunId: string | null = null
   ): boolean {
     this.beginImmediate();
     try {
@@ -1753,6 +1997,23 @@ export class TradingDatabase {
       }
 
       if (proposal.intent === "ENTRY") {
+        const activeAgent = this.db.prepare(
+          `SELECT agent_run_id, status, lease_expires_at_ms
+           FROM agent_runs WHERE status = 'ACTIVE' ORDER BY started_at_ms DESC LIMIT 1`
+        ).get() as { agent_run_id: string; status: string; lease_expires_at_ms: number } | undefined;
+        if (proposal.decisionOwner === "agent") {
+          if (
+            agentRunId === null ||
+            activeAgent?.agent_run_id !== agentRunId ||
+            activeAgent.lease_expires_at_ms <= nowMs
+          ) {
+            this.rollbackTransaction();
+            return false;
+          }
+        } else if (activeAgent !== undefined && activeAgent.lease_expires_at_ms > nowMs) {
+          this.rollbackTransaction();
+          return false;
+        }
         if (proposal.sessionId === null || proposal.sessionId !== sessionId) {
           this.rollbackTransaction();
           return false;
@@ -1826,6 +2087,10 @@ export class TradingDatabase {
       this.appendAudit("AUTONOMOUS_EXECUTION_CLAIMED", proposalId, {
         proposalHash,
         sessionId,
+        decisionOwner: proposal.decisionOwner ?? "daemon",
+        agentRunId: proposal.agentRunId ?? null,
+        modelVersion: proposal.modelVersion ?? null,
+        analysisHash: proposal.analysisHash ?? null,
         claimedAtMs: nowMs
       });
       this.commitTransaction();
@@ -2226,6 +2491,24 @@ export class TradingDatabase {
         payload_json TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS agent_runs (
+        agent_run_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        started_at_ms INTEGER NOT NULL,
+        last_heartbeat_at_ms INTEGER NOT NULL,
+        lease_expires_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL DEFAULT 0,
+        payload_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_run_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_run_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS legacy_import_reports (
         id TEXT PRIMARY KEY,
         token_id TEXT NOT NULL,
@@ -2253,6 +2536,10 @@ export class TradingDatabase {
         ON research_bundles(market_condition_id, token_id, expires_at_ms);
       CREATE INDEX IF NOT EXISTS idx_market_snapshots_token_time
         ON market_snapshots(token_id, captured_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_agent_runs_status
+        ON agent_runs(status, lease_expires_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_agent_run_events_run
+        ON agent_run_events(agent_run_id, created_at_ms);
       CREATE INDEX IF NOT EXISTS idx_legacy_import_reports_token
         ON legacy_import_reports(token_id, imported_at_ms);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_clob_order_id

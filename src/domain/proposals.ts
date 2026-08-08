@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   type OrderIntent,
   type OrderProposal,
-  type RiskContext
+  type RiskContext,
+  type MarketSnapshot
 } from "./types.js";
 import {
   DEFAULT_RISK_POLICY,
@@ -59,6 +60,18 @@ export function createOrderProposal(
     sources: intent.sources,
     correlationKey: intent.correlationKey,
     policyVersion: RISK_POLICY_VERSION,
+    ...(intent.decisionOwner === undefined
+      ? {}
+      : { decisionOwner: intent.decisionOwner }),
+    ...(intent.agentRunId === undefined
+      ? {}
+      : { agentRunId: intent.agentRunId }),
+    ...(intent.modelVersion === undefined
+      ? {}
+      : { modelVersion: intent.modelVersion }),
+    ...(intent.analysisHash === undefined
+      ? {}
+      : { analysisHash: intent.analysisHash }),
     ...(intent.exitReason === undefined
       ? {}
       : { exitReason: intent.exitReason })
@@ -75,6 +88,12 @@ export function verifyProposalHash(proposal: OrderProposal): boolean {
 export function hashCanonical(value: unknown): string {
   const serialized = JSON.stringify(canonicalize(value));
   return createHash("sha256").update(serialized).digest("hex");
+}
+
+/** Hash market facts used by an analysis while ignoring capture-time noise. */
+export function hashMarketSnapshot(snapshot: MarketSnapshot): string {
+  const { capturedAtMs: _capturedAtMs, ...stableSnapshot } = snapshot;
+  return hashCanonical(stableSnapshot);
 }
 
 function canonicalize(value: unknown): unknown {

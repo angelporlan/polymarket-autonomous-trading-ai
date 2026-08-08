@@ -8,7 +8,7 @@ import { DatabaseRiskContext } from "./application/risk-context.js";
 import { TradingService } from "./application/trading-service.js";
 import { DashboardHttpServer } from "./approval/server.js";
 import { loadConfig, type AppConfig } from "./config.js";
-import { ProposalRejectedError } from "./domain/proposals.js";
+import { hashCanonical, hashMarketSnapshot, ProposalRejectedError } from "./domain/proposals.js";
 import { DEFAULT_RISK_POLICY, RISK_POLICY_VERSION } from "./domain/risk-policy.js";
 import {
   formatMicros,
@@ -19,6 +19,7 @@ import {
   type PaperTrade,
   type PortfolioSnapshot,
   type ResearchBundle,
+  type AgentRun,
   type LegacyImportReport
 } from "./domain/types.js";
 import type { TradingSession } from "./domain/session.js";
@@ -58,10 +59,20 @@ import type {
   PrepareTradingSessionOutput,
   PrepareResearchBundleInput,
   PrepareResearchBundleOutput,
+  PrepareMarketEvidenceInput,
+  PrepareMarketEvidenceOutput,
   SupervisePositionsInput,
   SupervisePositionsOutput,
   ImportLegacyPositionInput,
-  ImportLegacyPositionOutput
+  ImportLegacyPositionOutput,
+  StartAgentRunInput,
+  StartAgentRunOutput,
+  HeartbeatAgentRunInput,
+  HeartbeatAgentRunOutput,
+  GetAgentRunInput,
+  GetAgentRunOutput,
+  StopAgentRunInput,
+  StopAgentRunOutput
 } from "./mcp/schemas.js";
 import { GuardedLiveTradingAdapter } from "./polymarket/live-adapter.js";
 import { PolygonReceiptVerifier } from "./polymarket/onchain-verifier.js";
@@ -474,6 +485,147 @@ export class PolymarketRuntime {
     return researchBundleOutput(bundle);
   }
 
+  async prepareMarketEvidence(
+    input: PrepareMarketEvidenceInput
+  ): Promise<PrepareMarketEvidenceOutput> {
+    this.requireProfile();
+    if (!this.database.isAgentRunActive(input.agentRunId)) {
+      throw new PublicMcpToolError(
+        "AGENT_RUN_NOT_ACTIVE",
+        "Market evidence must be created by the currently active agent lease."
+      );
+    }
+    const snapshot = await this.publicClient.getMarketSnapshot({
+      conditionId: input.conditionId,
+      tokenId: input.tokenId
+    });
+    const nowMs = Date.now();
+    this.database.saveMarketSnapshot(snapshot);
+    if (nowMs - snapshot.capturedAtMs > 5_000) {
+      throw new PublicMcpToolError(
+        "SNAPSHOT_STALE",
+        "The market snapshot is older than the five-second decision window."
+      );
+    }
+    const orderBookPayload = {
+      tokenId: snapshot.tokenId,
+      conditionId: snapshot.conditionId,
+      bestBidMicros: snapshot.bestBidMicros,
+      bestAskMicros: snapshot.bestAskMicros,
+      bids: snapshot.bids,
+      asks: snapshot.asks,
+      spreadMicros: snapshot.spreadMicros,
+      capturedAtMs: snapshot.capturedAtMs
+    };
+    const marketMetadataPayload = {
+      conditionId: snapshot.conditionId,
+      eventId: snapshot.eventId,
+      question: snapshot.question,
+      rules: snapshot.rules,
+      resolutionSource: snapshot.resolutionSource,
+      category: snapshot.category,
+      endTimeMs: snapshot.endTimeMs,
+      active: snapshot.active,
+      closed: snapshot.closed,
+      acceptingOrders: snapshot.acceptingOrders,
+      negRisk: snapshot.negRisk,
+      tickSizeMicros: snapshot.tickSizeMicros,
+      minOrderSizeMicros: snapshot.minOrderSizeMicros,
+      capturedAtMs: snapshot.capturedAtMs
+    };
+    const marketSources = [
+      {
+        origin: "CLOB" as const,
+        capturedAtMs: snapshot.capturedAtMs,
+        snapshotHash: hashMarketSnapshot(snapshot),
+        payloadHash: hashCanonical({ origin: "CLOB", payload: orderBookPayload })
+      },
+      {
+        origin: "GAMMA" as const,
+        capturedAtMs: snapshot.capturedAtMs,
+        snapshotHash: hashMarketSnapshot(snapshot),
+        payloadHash: hashCanonical({ origin: "GAMMA", payload: marketMetadataPayload })
+      }
+    ];
+    const bundleWithoutHash = {
+      id: `market_${hashCanonical({ input, snapshot, marketSources }).slice(0, 32)}`,
+      marketConditionId: snapshot.conditionId,
+      tokenId: snapshot.tokenId,
+      estimatedProbabilityMicros: parseDecimalToMicros(input.estimatedProbability),
+      eventVolatilityClass: input.eventVolatilityClass,
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + 120_000,
+      sources: [],
+      rationale: input.rationale,
+      counterRationale: input.counterRationale,
+      evidenceKind: "MARKET_DATA" as const,
+      marketSources,
+      modelVersion: input.modelVersion,
+      analysisHash: hashCanonical({
+        agentRunId: input.agentRunId,
+        modelVersion: input.modelVersion,
+        rationale: input.rationale,
+        counterRationale: input.counterRationale,
+        snapshot,
+        marketSources
+      })
+    };
+    const bundle: ResearchBundle = {
+      ...bundleWithoutHash,
+      contentHash: hashCanonical(bundleWithoutHash)
+    };
+    this.database.saveResearchBundle(bundle);
+    this.database.appendAudit("AGENT_ANALYSIS", input.agentRunId, {
+      marketConditionId: bundle.marketConditionId,
+      tokenId: bundle.tokenId,
+      modelVersion: input.modelVersion,
+      analysisHash: bundle.analysisHash,
+      contentHash: bundle.contentHash,
+      estimatedProbabilityMicros: bundle.estimatedProbabilityMicros,
+      marketSourceOrigins: marketSources.map((source) => source.origin)
+    });
+    return marketEvidenceOutput(bundle);
+  }
+
+  async startAgentRun(input: StartAgentRunInput): Promise<StartAgentRunOutput> {
+    this.requireProfile();
+    const account = await this.service.getAccountStatus();
+    if (!this.config.liveEnabled || account.mode !== "live_ready") {
+      throw new PublicMcpToolError(
+        "LIVE_LOCKED",
+        "An agent run requires an already authorized live session with every live gate open."
+      );
+    }
+    if (this.database.getActiveTradingSession("live") === null) {
+      throw new PublicMcpToolError("SESSION_INACTIVE", "Authorize a live trading session before starting the agent run.");
+    }
+    if (this.database.getEmergencyStop().active) {
+      throw new PublicMcpToolError("EMERGENCY_STOPPED", "The persistent emergency lock is active.");
+    }
+    return agentRunOutput(this.database.startAgentRun({ host: input.host, model: input.model }));
+  }
+
+  async heartbeatAgentRun(input: HeartbeatAgentRunInput): Promise<HeartbeatAgentRunOutput> {
+    return agentRunOutput(this.database.heartbeatAgentRun(input.agentRunId));
+  }
+
+  async getAgentRun(_input: GetAgentRunInput): Promise<GetAgentRunOutput> {
+    const run = this.database.getAgentRun();
+    return {
+      agentRun: run === null ? null : agentRunOutput(run),
+      checkedAt: new Date().toISOString()
+    };
+  }
+
+  async stopAgentRun(input: StopAgentRunInput): Promise<StopAgentRunOutput> {
+    const run = this.database.stopAgentRun(input.agentRunId, input.reason);
+    const emergency = await this.emergencyStop({
+      confirmation: "CANCEL_ALL_AND_LOCK",
+      reason: `AGENT_RUN_STOPPED:${input.reason}`
+    });
+    return { agentRun: agentRunOutput(run), emergencyStop: emergency };
+  }
+
   async activateTradingSession(
     input: ActivateTradingSessionInput
   ): Promise<ActivateTradingSessionOutput> {
@@ -732,6 +884,10 @@ export class PolymarketRuntime {
       thesis: input.thesis,
       counterThesis: input.counterThesis,
       sources: input.sources,
+      ...(input.decisionOwner === undefined ? {} : { decisionOwner: input.decisionOwner }),
+      ...(input.agentRunId === undefined ? {} : { agentRunId: input.agentRunId }),
+      ...(input.modelVersion === undefined ? {} : { modelVersion: input.modelVersion }),
+      ...(input.analysisHash === undefined ? {} : { analysisHash: input.analysisHash }),
       ...(input.researchBundleId === undefined
         ? {}
         : { researchBundleId: input.researchBundleId }),
@@ -881,6 +1037,18 @@ export class PolymarketRuntime {
       return;
     }
     this.closed = true;
+    const activeAgentRun = this.database.getAgentRun();
+    if (activeAgentRun?.status === "ACTIVE") {
+      this.database.stopAgentRun(activeAgentRun.agentRunId, "CONVERSATION_CLOSED");
+      this.database.setEmergencyStop(true, "CONVERSATION_CLOSED");
+      if (this.config.liveEnabled) {
+        try {
+          await this.service.emergencyStop("CONVERSATION_CLOSED");
+        } catch {
+          // The persistent lock remains even if best-effort cancellation fails.
+        }
+      }
+    }
     // Stop future gates and signing synchronously. The dashboard is then
     // drained so an already accepted callback cannot claim an execution after
     // the final ledger check.
@@ -996,6 +1164,12 @@ export async function createMcpToolDependencies(): Promise<McpToolDependencies> 
       guarded(() => runtime.prepareTradingSession(input)),
     prepareResearchBundle: (input) =>
       guarded(() => runtime.prepareResearchBundle(input)),
+    prepareMarketEvidence: (input) =>
+      guarded(() => runtime.prepareMarketEvidence(input)),
+    startAgentRun: (input) => guarded(() => runtime.startAgentRun(input)),
+    heartbeatAgentRun: (input) => guarded(() => runtime.heartbeatAgentRun(input)),
+    getAgentRun: (input) => guarded(() => runtime.getAgentRun(input)),
+    stopAgentRun: (input) => guarded(() => runtime.stopAgentRun(input)),
     activateTradingSession: (input) =>
       guarded(() => runtime.activateTradingSession(input)),
     getTradingSession: (input) =>
@@ -1188,6 +1362,10 @@ function proposalOutput(proposal: OrderProposal): StageOrderOutput {
     sources: proposal.sources,
     correlationKey: proposal.correlationKey,
     policyVersion: proposal.policyVersion,
+    ...(proposal.decisionOwner === undefined ? {} : { decisionOwner: proposal.decisionOwner }),
+    ...(proposal.agentRunId === undefined ? {} : { agentRunId: proposal.agentRunId }),
+    ...(proposal.modelVersion === undefined ? {} : { modelVersion: proposal.modelVersion }),
+    ...(proposal.analysisHash === undefined ? {} : { analysisHash: proposal.analysisHash }),
     ...(proposal.exitReason === undefined
       ? {}
       : { exitReason: proposal.exitReason })
@@ -1228,6 +1406,47 @@ function researchBundleOutput(
     rationale: bundle.rationale,
     counterRationale: bundle.counterRationale,
     contentHash: bundle.contentHash
+  };
+}
+
+function marketEvidenceOutput(bundle: ResearchBundle): PrepareMarketEvidenceOutput {
+  if (bundle.evidenceKind !== "MARKET_DATA" || bundle.marketSources === undefined || bundle.analysisHash === undefined || bundle.modelVersion === undefined) {
+    throw new Error("MARKET_EVIDENCE_OUTPUT_INVALID");
+  }
+  return {
+    researchBundleId: bundle.id,
+    conditionId: bundle.marketConditionId,
+    tokenId: bundle.tokenId,
+    estimatedProbability: formatMicros(bundle.estimatedProbabilityMicros),
+    eventVolatilityClass: bundle.eventVolatilityClass,
+    evidenceKind: "MARKET_DATA",
+    modelVersion: bundle.modelVersion,
+    createdAt: new Date(bundle.createdAtMs).toISOString(),
+    expiresAt: new Date(bundle.expiresAtMs).toISOString(),
+    marketSources: bundle.marketSources.map((source) => ({
+      origin: source.origin,
+      capturedAt: new Date(source.capturedAtMs).toISOString(),
+      snapshotHash: source.snapshotHash,
+      payloadHash: source.payloadHash
+    })),
+    rationale: bundle.rationale,
+    counterRationale: bundle.counterRationale,
+    contentHash: bundle.contentHash,
+    analysisHash: bundle.analysisHash
+  };
+}
+
+function agentRunOutput(run: AgentRun) {
+  return {
+    agentRunId: run.agentRunId,
+    host: run.host,
+    model: run.model,
+    status: run.status,
+    startedAt: new Date(run.startedAtMs).toISOString(),
+    lastHeartbeatAt: new Date(run.lastHeartbeatAtMs).toISOString(),
+    leaseExpiresAt: new Date(run.leaseExpiresAtMs).toISOString(),
+    stoppedAt: run.stoppedAtMs === null ? null : new Date(run.stoppedAtMs).toISOString(),
+    stopReason: run.stopReason
   };
 }
 

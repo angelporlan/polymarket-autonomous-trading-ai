@@ -38,10 +38,20 @@ import {
   prepareTradingSessionOutputSchema,
   prepareResearchBundleInputSchema,
   prepareResearchBundleOutputSchema,
+  prepareMarketEvidenceInputSchema,
+  prepareMarketEvidenceOutputSchema,
   supervisePositionsInputSchema,
   supervisePositionsOutputSchema,
   importLegacyPositionInputSchema,
   importLegacyPositionOutputSchema,
+  startAgentRunInputSchema,
+  startAgentRunOutputSchema,
+  heartbeatAgentRunInputSchema,
+  heartbeatAgentRunOutputSchema,
+  getAgentRunInputSchema,
+  getAgentRunOutputSchema,
+  stopAgentRunInputSchema,
+  stopAgentRunOutputSchema,
   type CancelOrderInput,
   type CancelOrderOutput,
   type EmergencyStopInput,
@@ -72,10 +82,20 @@ import {
   type PrepareTradingSessionOutput,
   type PrepareResearchBundleInput,
   type PrepareResearchBundleOutput,
+  type PrepareMarketEvidenceInput,
+  type PrepareMarketEvidenceOutput,
   type SupervisePositionsInput,
   type SupervisePositionsOutput,
   type ImportLegacyPositionInput,
-  type ImportLegacyPositionOutput
+  type ImportLegacyPositionOutput,
+  type StartAgentRunInput,
+  type StartAgentRunOutput,
+  type HeartbeatAgentRunInput,
+  type HeartbeatAgentRunOutput,
+  type GetAgentRunInput,
+  type GetAgentRunOutput,
+  type StopAgentRunInput,
+  type StopAgentRunOutput
 } from "./schemas.js";
 
 export type Awaitable<T> = T | Promise<T>;
@@ -98,6 +118,13 @@ export interface McpToolDependencies {
   prepareResearchBundle(
     input: PrepareResearchBundleInput
   ): Awaitable<PrepareResearchBundleOutput>;
+  prepareMarketEvidence?(
+    input: PrepareMarketEvidenceInput
+  ): Awaitable<PrepareMarketEvidenceOutput>;
+  startAgentRun?(input: StartAgentRunInput): Awaitable<StartAgentRunOutput>;
+  heartbeatAgentRun?(input: HeartbeatAgentRunInput): Awaitable<HeartbeatAgentRunOutput>;
+  getAgentRun?(input: GetAgentRunInput): Awaitable<GetAgentRunOutput>;
+  stopAgentRun?(input: StopAgentRunInput): Awaitable<StopAgentRunOutput>;
   activateTradingSession(
     input: ActivateTradingSessionInput
   ): Awaitable<ActivateTradingSessionOutput>;
@@ -385,6 +412,75 @@ export function createMcpServer(deps: McpToolDependencies): McpServer {
       invokeStructured(prepareResearchBundleOutputSchema, () =>
         deps.prepareResearchBundle(input)
       )
+  );
+
+  server.registerTool(
+    "prepare_market_evidence",
+    {
+      title: "Prepare market-only evidence",
+      description:
+        "Capture fresh CLOB and Gamma market data and persist a reproducible market-only evidence bundle. No news, secrets, or outcome influence is accepted.",
+      inputSchema: prepareMarketEvidenceInputSchema,
+      outputSchema: prepareMarketEvidenceOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(prepareMarketEvidenceOutputSchema, () =>
+        deps.prepareMarketEvidence!(input)
+      )
+  );
+
+  server.registerTool(
+    "start_agent_run",
+    {
+      title: "Start supervised agent run",
+      description:
+        "Acquire the single short-lived agent lease for live entries. Requires an already authorized live session and never creates or increases budget.",
+      inputSchema: startAgentRunInputSchema,
+      outputSchema: startAgentRunOutputSchema,
+      annotations: STAGE_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(startAgentRunOutputSchema, () => deps.startAgentRun!(input))
+  );
+
+  server.registerTool(
+    "heartbeat_agent_run",
+    {
+      title: "Heartbeat supervised agent run",
+      description: "Extend the agent lease while the host conversation remains active.",
+      inputSchema: heartbeatAgentRunInputSchema,
+      outputSchema: heartbeatAgentRunOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(heartbeatAgentRunOutputSchema, () => deps.heartbeatAgentRun!(input))
+  );
+
+  server.registerTool(
+    "get_agent_run",
+    {
+      title: "Get supervised agent run",
+      description: "Return the current agent owner lease and expiry state.",
+      inputSchema: getAgentRunInputSchema,
+      outputSchema: getAgentRunOutputSchema,
+      annotations: READ_ANNOTATIONS
+    },
+    (input) => invokeStructured(getAgentRunOutputSchema, () => deps.getAgentRun!(input))
+  );
+
+  server.registerTool(
+    "stop_agent_run",
+    {
+      title: "Stop supervised agent run",
+      description:
+        "Stop the agent lease, persist an emergency lock, and request best-effort cancellation of known live orders.",
+      inputSchema: stopAgentRunInputSchema,
+      outputSchema: stopAgentRunOutputSchema,
+      annotations: EXTERNAL_SAFETY_ACTION_ANNOTATIONS
+    },
+    (input) =>
+      invokeStructured(stopAgentRunOutputSchema, () => deps.stopAgentRun!(input))
   );
 
   server.registerTool(

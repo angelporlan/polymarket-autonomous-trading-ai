@@ -159,6 +159,10 @@ export interface StageOrderInput {
     retrievedAt: string;
     primary: boolean;
   }>;
+  decisionOwner?: "daemon" | "agent";
+  agentRunId?: string;
+  modelVersion?: string;
+  analysisHash?: string;
 }
 
 export interface StageOrderResult {
