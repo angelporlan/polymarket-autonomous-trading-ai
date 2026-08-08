@@ -1,4 +1,5 @@
-export const SUPERVISOR_NORMAL_INTERVAL_MS = 60_000;
+/** Entry scanner cadence. Safety failures still use exponential backoff. */
+export const SUPERVISOR_NORMAL_INTERVAL_MS = 10_000;
 export const SUPERVISOR_ACTIVE_MIN_INTERVAL_MS = 5_000;
 export const SUPERVISOR_ACTIVE_MAX_INTERVAL_MS = 15_000;
 export const SUPERVISOR_MAX_BACKOFF_MS = 60_000;

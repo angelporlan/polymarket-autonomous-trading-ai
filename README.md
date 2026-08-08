@@ -41,7 +41,7 @@ Re-validación de geoblock, mercado, tick, negRisk, comisiones y hard ceilings
     ↓
 Firmante restringido autoriza únicamente esa orden EIP-712 GTD
     ↓
-PositionSupervisor monitoriza automáticamente posiciones abiertas (stop-loss 30 %, take-profit 50 %, 14 días máx)
+PositionSupervisor monitoriza automáticamente posiciones abiertas (stop-loss 30 %, take-profit 50 %, 14 días máx). El supervisor local también ejecuta cada 10 segundos el escáner determinista de entradas: solo usa ResearchBundles verificados, historial de snapshots de 1/5/15 minutos y el libro actual; sin bundle vigente o sin historial suficiente la decisión es no operar.
 ```
 
 El servidor local en `127.0.0.1` funciona como un dashboard de solo lectura para monitorización (estado, posiciones, PnL, presupuesto y ledger). No expone acciones de aprobación ni firma manual.
@@ -81,7 +81,7 @@ Antes del POST se comprueba que el hash EIP-712 visto por ese firmante coincide 
 
 ### 4. Canary y piloto
 
-Las primeras 10 operaciones live usan el límite canary. Después, y solo sin incidentes, se aplican los límites del piloto:
+Las primeras 5 operaciones live usan como máximo 1 pUSD por orden y una sola posición simultánea. Después se mantienen los límites canary existentes; no hay promoción automática al piloto:
 
 | Control | Canary | Piloto |
 | --- | ---: | ---: |
@@ -125,6 +125,12 @@ npm test
 npm run build
 ```
 
+Tras completar los gates operativos, el proceso persistente se instala en la
+sesión de macOS con `npm run supervisor:install`. `launchd` mantiene una sola
+instancia, heartbeat y backoff; Codex/MCP solo consulta el dashboard local y
+puede activar el emergency stop. La instalación no activa live ni crea una
+sesión: ambas acciones siguen siendo una autorización local explícita.
+
 La configuración MCP incluida espera el artefacto `dist/mcp/server.js`. No inicies el servidor desde una terminal que imprima datos de autenticación y no redirijas su `stdout`: en modo MCP se reserva exclusivamente para JSON-RPC.
 
 El checklist operativo para paper soak, shadow live y canary está en [`RUNBOOK_PILOTO.md`](RUNBOOK_PILOTO.md). Sus casillas no se consideran completadas por ejecutar la suite automatizada.
@@ -145,6 +151,7 @@ Scripts declarados en `package.json`:
 | `npm run session:authorize -- --pending [id]` | Abre el helper nativo macOS, solicita importe y presencia local, y registra la autorización única. |
 | `npm run smoke` | Comprobaciones de conectividad sin enviar órdenes. |
 | `npm run ledger:export -- [directorio] [quote.json]` | Exporta el ledger completo a JSON, los eventos a CSV y el resumen contable pUSD/EUR a `accounting.csv`. El quote EUR es opcional; sin él, EUR queda explícitamente no disponible. |
+| `npm run audit:reconcile` | Diagnostica y registra una reparación append-only de una bifurcación histórica; nunca borra ni reescribe eventos. |
 
 ## Configuración sin secretos
 

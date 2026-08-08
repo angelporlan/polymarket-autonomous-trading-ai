@@ -11,6 +11,9 @@ export const RISK_POLICY_VERSION = "2026-07-pilot-v1";
 
 export const RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD = 100n * PUSD_SCALE;
 export const RISK_HARD_DAILY_STOP_PUSD = 10n * PUSD_SCALE;
+/** Fixed direct-canary constraint for the first five reconciled live trades. */
+export const INITIAL_CANARY_MAX_ORDER_PUSD = 1n * PUSD_SCALE;
+export const INITIAL_CANARY_TRADE_COUNT = 5;
 
 export interface RiskPolicy {
   capitalMicros: bigint;

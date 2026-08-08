@@ -39,7 +39,7 @@ describe("persistent position supervisor", () => {
   });
 
   it("uses the required normal, active, and jittered failure cadences", () => {
-    expect(nextSupervisorDelayMs(false, 0)).toBe(60_000);
+    expect(nextSupervisorDelayMs(false, 0)).toBe(10_000);
     expect(nextSupervisorDelayMs(true, 0)).toBe(5_000);
     expect(nextSupervisorDelayMs(true, 1)).toBe(15_000);
     expect(supervisorBackoffDelayMs(1, 0)).toBe(800);

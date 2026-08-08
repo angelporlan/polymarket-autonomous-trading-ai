@@ -7,6 +7,8 @@ import {
 } from "../domain/proposals.js";
 import {
   DEFAULT_RISK_POLICY,
+  INITIAL_CANARY_MAX_ORDER_PUSD,
+  INITIAL_CANARY_TRADE_COUNT,
   RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD,
   RISK_HARD_DAILY_STOP_PUSD,
   evaluateOrderRisk
@@ -26,6 +28,7 @@ import {
   type OrderSide,
   type PositionRecord,
   type PortfolioSnapshot,
+  type RiskContext,
   type ResearchBundle,
   type UserTradeActivity
 } from "../domain/types.js";
@@ -48,6 +51,12 @@ import {
   evaluatePositionExitPolicy,
   type EvaluationAction
 } from "../domain/position-supervisor.js";
+import {
+  evaluateOpportunity,
+  OPPORTUNITY_MODEL_VERSION,
+  snapshotHistoryPoint,
+  type OpportunityDecision
+} from "../domain/opportunity-scanner.js";
 import {
   computeLegacyImport,
   type LegacyImportResult,
@@ -294,6 +303,246 @@ export class TradingService {
       "economics",
       "technology"
     ]);
+  }
+
+  /**
+   * One deterministic entry pass. It is intentionally called by the local
+   * supervisor, never by the MCP request path. A missing session, evidence
+   * bundle, warm history or risk capacity is a normal no-op; no order is
+   * synthesized from momentum alone.
+   */
+  async runAutonomousEntryCycle(executionMode: "paper" | "live"): Promise<{
+    evaluatedCandidatesCount: number;
+    stagedCount: number;
+    executedCount: number;
+    skippedCount: number;
+    decisions: Array<{
+      conditionId: string;
+      tokenId: string;
+      accepted: boolean;
+      reason: string | null;
+      modelVersion: string;
+    }>;
+  }> {
+    const nowMs = this.now();
+    const session = this.options.database.getActiveTradingSession(executionMode, nowMs);
+    if (session === null) {
+      return {
+        evaluatedCandidatesCount: 0,
+        stagedCount: 0,
+        executedCount: 0,
+        skippedCount: 1,
+        decisions: []
+      };
+    }
+
+    const risk = await this.options.riskContexts.summary();
+    if (risk.emergencyStopped || risk.dailyPnlMicros <= -RISK_HARD_DAILY_STOP_PUSD) {
+      return {
+        evaluatedCandidatesCount: 0,
+        stagedCount: 0,
+        executedCount: 0,
+        skippedCount: 1,
+        decisions: []
+      };
+    }
+    const candidates = (await this.scanCandidates()).slice(0, 50);
+    const decisions: Array<{
+      conditionId: string;
+      tokenId: string;
+      accepted: boolean;
+      reason: string | null;
+      modelVersion: string;
+    }> = [];
+    let stagedCount = 0;
+    let executedCount = 0;
+    let skippedCount = 0;
+    let initialCanaryPositionTaken = false;
+    if (executionMode === "live" && risk.liveTradeCount < INITIAL_CANARY_TRADE_COUNT) {
+      try {
+        const portfolio = await this.getPortfolio();
+        initialCanaryPositionTaken = portfolio.positions.some(
+          (position) => position.sizeMicros > 0n
+        );
+      } catch {
+        // A live entry cannot be sized safely without portfolio evidence.
+        return {
+          evaluatedCandidatesCount: 0,
+          stagedCount: 0,
+          executedCount: 0,
+          skippedCount: 1,
+          decisions: []
+        };
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (
+        executionMode === "live" &&
+        risk.liveTradeCount < INITIAL_CANARY_TRADE_COUNT &&
+        initialCanaryPositionTaken
+      ) {
+        break;
+      }
+      for (const tokenId of candidate.tokenIds.slice(0, 2)) {
+        let decision: OpportunityDecision | null = null;
+        try {
+          const firstSnapshot = await this.getMarketSnapshot({
+            conditionId: candidate.conditionId,
+            tokenId
+          });
+          this.options.database.saveMarketSnapshot(firstSnapshot);
+          const history = this.options.database.listMarketSnapshots(
+            tokenId,
+            nowMs - 20 * 60_000,
+            500
+          );
+          const bundle = this.options.database.getLatestResearchBundle(
+            candidate.conditionId,
+            tokenId,
+            nowMs
+          );
+          const orderBudgetMicros =
+            executionMode === "live" &&
+            risk.liveTradeCount < INITIAL_CANARY_TRADE_COUNT
+              ? 1n * PUSD_SCALE
+              : risk.liveTradeCount < DEFAULT_RISK_POLICY.canaryTradeCount
+                ? DEFAULT_RISK_POLICY.canaryMaxOrderMicros
+                : DEFAULT_RISK_POLICY.pilotMaxOrderMicros;
+          if (firstSnapshot.bestAskMicros <= 0n) {
+            decision = evaluateOpportunity({
+              candidate,
+              snapshot: firstSnapshot,
+              history: history.map(snapshotHistoryPoint),
+              researchBundle: bundle,
+              nowMs,
+              riskMicros: orderBudgetMicros
+            });
+          } else {
+            const executableSnapshot = await this.getMarketSnapshot({
+              conditionId: candidate.conditionId,
+              tokenId,
+              outcome: firstSnapshot.outcome,
+              side: "BUY",
+              limitPriceMicros: firstSnapshot.bestAskMicros
+            });
+            this.options.database.saveMarketSnapshot(executableSnapshot);
+            const currentHistory = this.options.database.listMarketSnapshots(
+              tokenId,
+              nowMs - 20 * 60_000,
+              500
+            );
+            decision = evaluateOpportunity({
+              candidate,
+              snapshot: executableSnapshot,
+              history: currentHistory.map(snapshotHistoryPoint),
+              researchBundle: bundle,
+              nowMs: this.now(),
+              riskMicros: orderBudgetMicros
+            });
+            if (decision.accepted && bundle !== null && isResearchBundleUsable(
+              bundle,
+              executableSnapshot.conditionId,
+              executableSnapshot.tokenId,
+              decision.estimatedProbabilityMicros ?? -1n,
+              this.now()
+            )) {
+              const duplicateEntry = this.options.database.listProposals().some(
+                (proposal) =>
+                  proposal.executionMode === executionMode &&
+                  proposal.intent === "ENTRY" &&
+                  ["STAGED", "EXECUTING", "SUBMITTED", "SIMULATED"].includes(proposal.status) &&
+                  proposal.createdAtMs >= this.now() - 15 * 60_000 &&
+                  (proposal.market.tokenId === executableSnapshot.tokenId ||
+                    proposal.correlationKey === canonicalCorrelationKey(executableSnapshot))
+              );
+              if (duplicateEntry) {
+                decision = { ...decision, accepted: false, reason: "INVALID_MARKET_DATA" };
+                decisions.push({
+                  conditionId: candidate.conditionId,
+                  tokenId,
+                  accepted: false,
+                  reason: "ACTIVE_ENTRY_PROPOSAL_EXISTS",
+                  modelVersion: OPPORTUNITY_MODEL_VERSION
+                });
+                skippedCount += 1;
+                continue;
+              }
+              const sharesMicros = sizeSharesForBudget(
+                orderBudgetMicros,
+                executableSnapshot.bestAskMicros
+              );
+              if (sharesMicros > 0n) {
+                const staged = await this.stageOrder({
+                  executionMode,
+                  intent: "ENTRY",
+                  tokenId,
+                  conditionId: candidate.conditionId,
+                  outcome: executableSnapshot.outcome,
+                  side: "BUY",
+                  shares: formatMicros(sharesMicros),
+                  limitPrice: formatMicros(executableSnapshot.bestAskMicros),
+                  estimatedProbability: formatMicros(bundle.estimatedProbabilityMicros),
+                  researchBundleId: bundle.id,
+                  thesis: autonomousThesis(bundle.rationale, decision.features),
+                  counterThesis: autonomousCounterThesis(bundle.counterRationale, decision.features),
+                  sources: evidenceSourcesFromResearchBundle(bundle)
+                });
+                stagedCount += 1;
+                this.options.database.appendAudit("AUTONOMOUS_ENTRY_STAGED", staged.proposal.id, {
+                  modelVersion: OPPORTUNITY_MODEL_VERSION,
+                  conditionId: candidate.conditionId,
+                  tokenId,
+                  decision: decision.features
+                });
+                if (executionMode === "live") {
+                  const execution = await this.executeStagedProposal(
+                    staged.proposal.id,
+                    staged.proposal.hash
+                  );
+                  if (execution.accepted) {
+                    executedCount += 1;
+                    initialCanaryPositionTaken = true;
+                  }
+                } else {
+                  executedCount += 1;
+                }
+              } else {
+                decision = { ...decision, accepted: false, reason: "INVALID_MARKET_DATA" };
+              }
+            } else if (decision.accepted) {
+              decision = { ...decision, accepted: false, reason: "RESEARCH_INCONSISTENT" };
+            }
+          }
+        } catch (error) {
+          decision = {
+            accepted: false,
+            reason: "INVALID_MARKET_DATA",
+            features: null,
+            researchBundleId: null,
+            estimatedProbabilityMicros: null
+          };
+        }
+        if (decision === null) {
+          continue;
+        }
+        if (!decision.accepted) skippedCount += 1;
+        decisions.push({
+          conditionId: candidate.conditionId,
+          tokenId,
+          accepted: decision.accepted,
+          reason: decision.reason,
+          modelVersion: OPPORTUNITY_MODEL_VERSION
+        });
+      }
+    }
+    return {
+      evaluatedCandidatesCount: candidates.length,
+      stagedCount,
+      executedCount,
+      skippedCount,
+      decisions
+    };
   }
 
   getMarketSnapshot(reference: MarketReference) {
@@ -577,6 +826,10 @@ export class TradingService {
         );
       }
       throw error;
+    }
+
+    if (proposal.executionMode === "live" && proposal.intent === "ENTRY") {
+      enforceInitialCanaryEntry(proposal, context, this.options.database.countCanaryEligibleExecutions());
     }
 
     if (proposal.intent !== "EXIT") {
@@ -1674,6 +1927,13 @@ export class TradingService {
       },
       context
     );
+    if (proposal.intent === "ENTRY") {
+      enforceInitialCanaryEntry(
+        proposal,
+        context,
+        this.options.database.countCanaryEligibleExecutions()
+      );
+    }
     if (evaluation.violations.length > 0) {
       throw new ProposalRejectedError(evaluation.violations);
     }
@@ -1755,6 +2015,7 @@ function isResearchBundleUsable(
       : MAX_SOURCE_AGE_MS;
   if (
     bundle.sources.length < 2 ||
+    new Set(bundle.sources.map((source) => source.registrableDomain)).size < 2 ||
     bundle.sources.some((source) => {
       let parsed: URL;
       try {
@@ -1808,6 +2069,61 @@ function toExitReason(reason: ExitState): ExitReason {
 
 function maxRemaining(limitMicros: bigint, usedMicros: bigint): bigint {
   return limitMicros > usedMicros ? limitMicros - usedMicros : 0n;
+}
+
+function sizeSharesForBudget(budgetMicros: bigint, priceMicros: bigint): bigint {
+  if (budgetMicros <= 0n || priceMicros <= 0n) return 0n;
+  // The CLOB SDK accepts two decimal places for share size. Always round down
+  // so fee reservation and the hard exposure ceiling remain conservative.
+  const raw = (budgetMicros * PUSD_SCALE) / priceMicros;
+  return (raw / 10_000n) * 10_000n;
+}
+
+function enforceInitialCanaryEntry(
+  proposal: OrderProposal,
+  context: RiskContext,
+  reconciledLiveTradeCount: number
+): void {
+  if (reconciledLiveTradeCount >= INITIAL_CANARY_TRADE_COUNT) return;
+  const violations = [] as Array<{
+    code: "ORDER_TOO_LARGE" | "TOO_MANY_MARKETS";
+    message: string;
+  }>;
+  if (proposal.maxLossMicros > INITIAL_CANARY_MAX_ORDER_PUSD) {
+    violations.push({
+      code: "ORDER_TOO_LARGE",
+      message: "The first five live trades are capped at 1 pUSD including fee reserve."
+    });
+  }
+  if (context.totalOpenExposureMicros > 0n && context.marketExposureMicros === 0n) {
+    violations.push({
+      code: "TOO_MANY_MARKETS",
+      message: "The first five live trades allow only one simultaneous position."
+    });
+  }
+  if (violations.length > 0) {
+    throw new ProposalRejectedError(violations);
+  }
+}
+
+function autonomousThesis(
+  rationale: string,
+  features: OpportunityDecision["features"]
+): string {
+  const edge = features === null ? "unknown" : formatMicros(features.netEdgeMicros);
+  const movement =
+    features?.movement15mMicros === null || features?.movement15mMicros === undefined
+      ? "unknown"
+      : formatMicros(features.movement15mMicros);
+  return `Deterministic ${OPPORTUNITY_MODEL_VERSION} accepted verified research with net edge ${edge} pUSD/share and 15-minute movement ${movement}. ${rationale}`;
+}
+
+function autonomousCounterThesis(
+  counterRationale: string,
+  features: OpportunityDecision["features"]
+): string {
+  const spread = features === null ? "unknown" : formatMicros(features.spreadMicros);
+  return `The trade remains exposed to probability error, spread ${spread} pUSD, stale evidence and adverse movement; the exit supervisor enforces hard exits. ${counterRationale}`;
 }
 
 function assertSameMarketContract(

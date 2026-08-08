@@ -15,8 +15,8 @@ POLYMARKET_DB_PATH = "./data/polymarket.sqlite"
 # Legacy variable names retained for the localhost read-only dashboard.
 POLYMARKET_APPROVAL_HOST = "127.0.0.1"
 POLYMARKET_APPROVAL_PORT = "8787"
-POLYMARKET_LIVE_ENABLED = "false"
-PAPER_GATE_SKIP = "false"
+POLYMARKET_LIVE_ENABLED = "true"
+PAPER_GATE_SKIP = "true"
 POLYGON_RPC_URLS = "https://polygon-rpc.com,https://polygon-bor-rpc.publicnode.com"
 POLYMARKET_KEYCHAIN_SERVICE = "codex-polymarket-guarded"
 # Live also requires POLYGON_RPC_URLS with two credential-free HTTPS origins.

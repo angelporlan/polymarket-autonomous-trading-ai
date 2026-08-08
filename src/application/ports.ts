@@ -31,7 +31,7 @@ export interface AccountStatus {
 export interface MarketReference {
   conditionId: string;
   tokenId: string;
-  outcome: string;
+  outcome?: string;
   side?: OrderSide;
   limitPriceMicros?: bigint;
 }

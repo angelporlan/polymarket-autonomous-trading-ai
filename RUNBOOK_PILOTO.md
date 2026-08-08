@@ -12,16 +12,17 @@ Este documento es una checklist operativa. No activa live, no solicita secretos 
 - [ ] Ejecutar `npm test`.
 - [ ] Ejecutar `npm run build`.
 - [ ] Ejecutar `npm audit --audit-level=high` y registrar los hallazgos moderados/bajos pendientes.
+- [ ] Ejecutar `npm run audit:reconcile` si la cadena histórica no es válida; la reparación solo añade un marcador y conserva todos los eventos.
 - [ ] Ejecutar el escaneo de secretos disponible en CI; no usar claves reales, fondos reales ni endpoints de producción en pruebas.
 - [ ] Verificar que el dashboard escucha solo en `127.0.0.1` y que `POST` devuelve `405`.
 
-## 1. Paper soak — mínimo 14 días
+## 1. Paper soak — mínimo 30 días
 
 Registrar una fila por día en el ledger de revisión local:
 
 | Día | Operaciones | PnL neto | Drawdown | Violaciones | Errores de reconciliación | Supervisor | Reinicio probado | Incidentes |
 | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
-| 1–14 |  |  |  |  |  |  |  |  |
+| 1–30 |  |  |  |  |  |  |  |  |
 
 Durante el periodo:
 
@@ -34,7 +35,7 @@ Durante el periodo:
 - [ ] Verificar que el dashboard sigue siendo solo lectura y no contiene respuestas autenticadas.
 - [ ] No pasar a shadow si existe una violación de riesgo, error de reconciliación o cadena de auditoría inválida.
 
-Gate de salida: al menos 14 días, al menos 50 operaciones paper, PnL neto positivo, drawdown dentro del límite, cero violaciones de riesgo y cero errores de reconciliación.
+Gate de salida: al menos 30 días, al menos 50 operaciones paper, PnL neto positivo, drawdown dentro del límite, cero violaciones de riesgo y cero errores de reconciliación. El modelo de probabilidad se considera calibrado solo después de este gate.
 
 ## 2. Shadow live — mínimo 7 días
 
@@ -73,4 +74,4 @@ Gate de salida: cero incidentes y revisión diaria del ledger antes de considera
 
 ## Estado actual
 
-El repositorio contiene pruebas automatizadas y este runbook, pero el paper soak de 14 días, el shadow live de 7 días y el canary no están declarados como completados.
+El repositorio contiene pruebas automatizadas y este runbook, pero el paper soak de 30 días, el shadow live de 7 días y el canary no están declarados como completados.

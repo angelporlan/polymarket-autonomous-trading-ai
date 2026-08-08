@@ -21,4 +21,8 @@ export interface SupervisorHeartbeat {
 export interface SupervisorCycleResult extends SupervisePositionsOutput {
   reconciliationActive: boolean;
   priorityReevaluation: boolean;
+  entryEvaluatedCandidatesCount: number;
+  entryStagedCount: number;
+  entryExecutedCount: number;
+  entrySkippedCount: number;
 }

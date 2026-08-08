@@ -531,7 +531,7 @@ por defecto: HOLD_UNTIL_RESOLUTION
 ## Evidencia de completado
 
 - `PositionRecord` separa `lastMarketPriceMicros`, `lastEstimatedProbabilityMicros`, `lastResearchBundleId`, probabilidades/edge de entrada y los IDs de la salida activa; los registros antiguos se normalizan sin convertir silenciosamente el precio en probabilidad.
-- El supervisor aplica stop-loss al 70%, take-profit al 150%, duración máxima de 14 días y conserva `HOLD_UNTIL_RESOLUTION` durante la ventana de 24 horas.
+- El supervisor aplica stop-loss al 30%, take-profit al 50%, duración máxima de 14 días y conserva `HOLD_UNTIL_RESOLUTION` durante la ventana de 24 horas.
 - Un movimiento de precio del 20% produce `RESEARCH_REQUIRED` sin vender; la pérdida de edge queda bloqueada hasta recibir probabilidad y bundle de research válidos.
 - `researchRequiredSinceMs`, el precio del shock y `minimumResearchCreatedAtMs` se conservan entre ciclos y solo se limpian con un bundle creado después del shock.
 - La salida usa probabilidad `0` cuando aún no existe estimación, únicamente como valor neutro de transporte para `EXIT`; nunca reutiliza el precio de mercado como probabilidad.
@@ -685,8 +685,8 @@ Cerrar Antigravity no detiene stop-loss, take-profit, reconciliación ni cancela
 
 ## Evidencia de completado
 
-- [x] `src/supervisor/main.ts` ejecuta el ciclo de reconciliación y reducción de riesgo en un proceso separado del MCP.
-- [x] El supervisor no crea sesiones, no prepara entradas y no expone una ruta de firma; solo invoca la reconciliación live y `EXIT` de `supervisePositions`.
+- [x] `src/supervisor/main.ts` ejecuta cada 10 segundos el ciclo de scanner determinista, entradas, reconciliación y reducción de riesgo en un proceso separado del MCP.
+- [x] El supervisor no crea sesiones ni expone una ruta de firma; solo consume una sesión ya autorizada y prepara entradas exclusivamente desde ResearchBundles verificados mediante `stage_order → execute_staged_order`.
 - [x] `SupervisorProcessLock` impide dos instancias y recupera locks cuyo PID ya no existe.
 - [x] El heartbeat se persiste en `system_state` con estado, PID, ciclo, fallos y próxima ejecución; no registra mensajes externos ni secretos.
 - [x] La cadencia es de 60 segundos en reposo, 5–15 segundos durante reconciliación activa o tras un movimiento que exige nueva investigación, y usa backoff con jitter ante fallos.
@@ -876,7 +876,7 @@ superficie de autorización.
 - [x] Verificación local: `npm run typecheck`, `npm run build` y `npm test` correctos (`29` archivos, `254` tests).
 - [x] `npm audit --audit-level=high` queda sin vulnerabilidades altas tras una actualización no forzada del lockfile. Permanecen dos moderadas del `@modelcontextprotocol/sdk@1.29.0` fijado y vulnerabilidades bajas transitivas, incluida `elliptic` sin fix disponible; no se ejecutó `npm audit fix --force`.
 - [x] Escaneo dirigido de secretos sobre código no generado, excluyendo fixtures sintéticos, no encontró claves privadas, frases semilla, credenciales L2, tokens Bearer ni claves API utilizables; `gitleaks` no está instalado en el entorno.
-- [ ] El soak paper de 14 días y el shadow live de 7 días aún requieren ejecución operativa sostenida; no se declaran completados por pruebas unitarias.
+- [ ] El soak paper de 30 días y el shadow live de 7 días aún requieren ejecución operativa sostenida; no se declaran completados por pruebas unitarias.
 
 ## CI
 
@@ -904,7 +904,7 @@ automatizadas no sustituyen un soak ni un shadow live.
 
 ## Fase A — Paper completo
 
-Duración mínima recomendada: 14 días adicionales después de implementar el nuevo motor.
+Duración mínima recomendada: 30 días adicionales después de implementar el nuevo motor.
 
 Validar:
 

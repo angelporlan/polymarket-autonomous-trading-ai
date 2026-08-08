@@ -325,7 +325,7 @@ export class OnboardingService {
       );
     }
 
-    this.database.db.exec("BEGIN IMMEDIATE");
+    this.database.beginImmediateTransaction();
     try {
       if (!this.database.verifyAuditChain()) {
         throw new Error("The audit chain changed during reconciliation.");
@@ -338,9 +338,9 @@ export class OnboardingService {
       this.database.setLiveActivation(false);
       this.database.resetCanaryProgress("INCIDENT_REVIEWED");
       this.database.setEmergencyStop(false, "MANUAL_LOCAL_REVIEW");
-      this.database.db.exec("COMMIT");
+      this.database.commitDatabaseTransaction();
     } catch (error) {
-      this.database.db.exec("ROLLBACK");
+      this.database.rollbackDatabaseTransaction();
       throw error;
     }
   }

@@ -10,7 +10,8 @@ import type {
   PositionRecord,
   ProposalStatus,
   ResearchBundle,
-  LegacyImportReport
+  LegacyImportReport,
+  MarketSnapshot
 } from "../domain/types.js";
 import {
   createTradingSession,
@@ -23,7 +24,7 @@ import {
   canonicalCorrelationKey
 } from "../domain/types.js";
 import { RISK_POLICY_VERSION } from "../domain/risk-policy.js";
-import { verifyProposalHash } from "../domain/proposals.js";
+import { hashCanonical, verifyProposalHash } from "../domain/proposals.js";
 import {
   normalizeClobOrderStatus,
   parseClobFixed6
@@ -46,6 +47,11 @@ interface ExecutionRow {
 
 interface StateRow {
   value: string;
+}
+
+interface SnapshotRow {
+  payload_json: string;
+  snapshot_hash: string;
 }
 
 const ACTIVE_EXIT_RESERVATION_STATUSES = new Set([
@@ -80,9 +86,12 @@ export interface AccountBindingRecord {
   verifiedAtMs: number;
 }
 
+const AUDIT_RECONCILIATION_EVENT = "AUDIT_CHAIN_RECONCILIATED";
+
 export class TradingDatabase {
   readonly db: DatabaseSync;
   private readonly getProposalStatement: StatementSync;
+  private transactionActive = false;
 
   constructor(filename: string) {
     if (filename !== ":memory:") {
@@ -118,8 +127,30 @@ export class TradingDatabase {
     proposal: OrderProposal,
     availableExitSharesMicros?: bigint
   ): void {
-    this.db.exec("BEGIN IMMEDIATE");
+    this.beginImmediate();
     try {
+      if (proposal.executionMode === "live" && proposal.intent === "ENTRY") {
+        const activeRows = this.db
+          .prepare(
+            `SELECT p.payload_json FROM proposals p
+             LEFT JOIN executions e ON e.proposal_id = p.id
+             WHERE p.status IN ('STAGED', 'EXECUTING', 'SUBMITTED', 'SIMULATED')
+               AND p.created_at_ms >= ?
+               AND (p.status <> 'SUBMITTED' OR e.status IS NULL OR
+                    UPPER(e.status) NOT IN ('CANCELLED', 'CANCELED', 'EXPIRED', 'CONFIRMED', 'REJECTED'))`
+          )
+          .all(proposal.createdAtMs - 15 * 60_000) as unknown as ProposalRow[];
+        for (const row of activeRows) {
+          const active = parseWithBigInts<OrderProposal>(row.payload_json);
+          if (
+            active.intent === "ENTRY" &&
+            (active.market.tokenId === proposal.market.tokenId ||
+              active.correlationKey === proposal.correlationKey)
+          ) {
+            throw new Error("ACTIVE_ENTRY_PROPOSAL_EXISTS");
+          }
+        }
+      }
       if (proposal.executionMode === "live" && proposal.intent === "EXIT") {
         if (
           availableExitSharesMicros === undefined ||
@@ -196,9 +227,9 @@ export class TradingDatabase {
           ? { reservedExitSharesMicros: proposal.sharesMicros }
           : {})
       });
-      this.db.exec("COMMIT");
+      this.commitTransaction();
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollbackTransaction();
       throw error;
     }
   }
@@ -262,7 +293,7 @@ export class TradingDatabase {
     ) {
       throw new Error("Invalid submitted execution record.");
     }
-    this.db.exec("BEGIN IMMEDIATE");
+    this.beginImmediate();
     try {
       const execution = this.db
         .prepare(
@@ -300,15 +331,15 @@ export class TradingDatabase {
           .update(record.responseJson)
           .digest("hex")
       });
-      this.db.exec("COMMIT");
+      this.commitTransaction();
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollbackTransaction();
       throw error;
     }
   }
 
   markExecutionFailed(proposalId: string, proposalHash: string): void {
-    this.db.exec("BEGIN IMMEDIATE");
+    this.beginImmediate();
     try {
       const current = this.db
         .prepare(
@@ -317,7 +348,7 @@ export class TradingDatabase {
         )
         .get(proposalId, proposalHash) as { status: string } | undefined;
       if (current !== undefined && current.status !== "CLAIMED") {
-        this.db.exec("COMMIT");
+        this.commitTransaction();
         return;
       }
       this.db
@@ -338,9 +369,9 @@ export class TradingDatabase {
       this.db
         .prepare("DELETE FROM exit_reservations WHERE proposal_id = ?")
         .run(proposalId);
-      this.db.exec("COMMIT");
+      this.commitTransaction();
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollbackTransaction();
       throw error;
     }
   }
@@ -354,7 +385,7 @@ export class TradingDatabase {
     if (responseJson.length > 1_000_000) {
       throw new Error("Execution uncertainty response is too large.");
     }
-    this.db.exec("BEGIN IMMEDIATE");
+    this.beginImmediate();
     try {
       const result = this.db
         .prepare(
@@ -372,9 +403,9 @@ export class TradingDatabase {
         responseHash: createHash("sha256").update(responseJson).digest("hex"),
         recordedAtMs: nowMs
       });
-      this.db.exec("COMMIT");
+      this.commitTransaction();
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollbackTransaction();
       throw error;
     }
   }
@@ -388,7 +419,7 @@ export class TradingDatabase {
     if (!/^0x[a-fA-F0-9]{64}$/u.test(clobOrderId)) {
       throw new Error("Invalid CLOB order id for uncertain execution.");
     }
-    this.db.exec("BEGIN IMMEDIATE");
+    this.beginImmediate();
     try {
       const execution = this.db
         .prepare(
@@ -416,9 +447,9 @@ export class TradingDatabase {
         clobOrderId,
         boundAtMs: nowMs
       });
-      this.db.exec("COMMIT");
+      this.commitTransaction();
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollbackTransaction();
       throw error;
     }
   }
@@ -506,7 +537,7 @@ export class TradingDatabase {
     const responseHash = createHash("sha256")
       .update(responseJson)
       .digest("hex");
-    this.db.exec("BEGIN IMMEDIATE");
+    this.beginImmediate();
     try {
       const current = this.db
         .prepare(
@@ -527,7 +558,7 @@ export class TradingDatabase {
         )
         .run(status, responseJson, proposalId, current.status);
       if (result.changes !== 1) {
-        this.db.exec("ROLLBACK");
+        this.rollbackTransaction();
         return false;
       }
       const proposal = this.getProposal(proposalId);
@@ -560,10 +591,10 @@ export class TradingDatabase {
         responseHash,
         reconciledAtMs: nowMs
       });
-      this.db.exec("COMMIT");
+      this.commitTransaction();
       return true;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollbackTransaction();
       throw error;
     }
   }
@@ -1234,7 +1265,7 @@ export class TradingDatabase {
     ) {
       throw new Error("Invalid native trading session attestation.");
     }
-    this.db.exec("BEGIN IMMEDIATE");
+    this.beginImmediate();
     try {
       const pendingRow = this.db
         .prepare(
@@ -1311,9 +1342,9 @@ export class TradingDatabase {
         attestationNonce,
         confirmedAtMs
       });
-      this.db.exec("COMMIT");
+      this.commitTransaction();
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollbackTransaction();
       throw error;
     }
   }
@@ -1322,7 +1353,7 @@ export class TradingDatabase {
     pendingSessionId: string,
     nowMs = Date.now()
   ): TradingSession | null {
-    this.db.exec("BEGIN IMMEDIATE");
+    this.beginImmediate();
     try {
       const pendingRow = this.db
         .prepare(
@@ -1332,7 +1363,7 @@ export class TradingDatabase {
         .get(pendingSessionId, nowMs) as ProposalRow | undefined;
       const authorization = this.getSessionAuthorization(pendingSessionId);
       if (!pendingRow || !authorization || authorization.consumedAtMs !== null) {
-        this.db.exec("ROLLBACK");
+        this.rollbackTransaction();
         return null;
       }
       const pending = parseWithBigInts<PendingTradingSession>(pendingRow.payload_json);
@@ -1344,7 +1375,7 @@ export class TradingDatabase {
         )
         .get(pending.executionMode, nowMs);
       if (active) {
-        this.db.exec("ROLLBACK");
+        this.rollbackTransaction();
         return null;
       }
 
@@ -1378,7 +1409,7 @@ export class TradingDatabase {
         )
         .run(nowMs, pendingSessionId);
       if (pendingUpdate.changes !== 1 || authorizationUpdate.changes !== 1) {
-        this.db.exec("ROLLBACK");
+        this.rollbackTransaction();
         return null;
       }
       this.appendAudit("TRADING_SESSION_ACTIVATED", session.id, {
@@ -1386,10 +1417,10 @@ export class TradingDatabase {
         amountMicros: session.authorizedBudgetMicros,
         activatedAtMs: nowMs
       });
-      this.db.exec("COMMIT");
+      this.commitTransaction();
       return session;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollbackTransaction();
       throw error;
     }
   }
@@ -1521,6 +1552,49 @@ export class TradingDatabase {
     return rows.map((row) => parseWithBigInts<ResearchBundle>(row.payload_json));
   }
 
+  /** Append-only market history used by the deterministic opportunity scanner. */
+  saveMarketSnapshot(snapshot: MarketSnapshot): string {
+    const payload = stringifyWithBigInts(snapshot);
+    const snapshotHash = hashCanonical(snapshot);
+    this.db
+      .prepare(
+        `INSERT INTO market_snapshots
+          (token_id, condition_id, captured_at_ms, snapshot_hash, payload_json)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(
+        snapshot.tokenId,
+        snapshot.conditionId,
+        snapshot.capturedAtMs,
+        snapshotHash,
+        payload
+      );
+    return snapshotHash;
+  }
+
+  listMarketSnapshots(
+    tokenId: string,
+    sinceMs: number,
+    limit = 500
+  ): MarketSnapshot[] {
+    const boundedLimit = Math.min(2_000, Math.max(1, Math.floor(limit)));
+    const rows = this.db
+      .prepare(
+        `SELECT payload_json, snapshot_hash FROM market_snapshots
+         WHERE token_id = ? AND captured_at_ms >= ?
+         ORDER BY captured_at_ms ASC LIMIT ?`
+      )
+      .all(tokenId, sinceMs, boundedLimit) as unknown as SnapshotRow[];
+    return rows.flatMap((row) => {
+      try {
+        const snapshot = parseWithBigInts<MarketSnapshot>(row.payload_json);
+        return hashCanonical(snapshot) === row.snapshot_hash ? [snapshot] : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+
   getPositionRecord(tokenId: string): PositionRecord | null {
     const row = this.db
       .prepare("SELECT payload_json FROM position_records WHERE token_id = ?")
@@ -1601,7 +1675,7 @@ export class TradingDatabase {
     sessionId: string | null,
     nowMs: number
   ): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
+    this.beginImmediate();
     try {
       const proposal = this.getProposal(proposalId);
       if (
@@ -1615,7 +1689,7 @@ export class TradingDatabase {
         (proposal.intent === "EXIT" &&
           (proposal.side !== "SELL" || proposal.maxLossMicros !== 0n))
       ) {
-        this.db.exec("ROLLBACK");
+        this.rollbackTransaction();
         return false;
       }
 
@@ -1629,21 +1703,21 @@ export class TradingDatabase {
           reservation === undefined ||
           BigInt(reservation.shares_micros) !== proposal.sharesMicros
         ) {
-          this.db.exec("ROLLBACK");
+          this.rollbackTransaction();
           return false;
         }
       }
 
       if (proposal.intent === "ENTRY") {
         if (proposal.sessionId === null || proposal.sessionId !== sessionId) {
-          this.db.exec("ROLLBACK");
+          this.rollbackTransaction();
           return false;
         }
         const sessionRow = this.db
           .prepare("SELECT payload_json FROM trading_sessions WHERE id = ? AND status = 'ACTIVE'")
           .get(proposal.sessionId) as ProposalRow | undefined;
         if (!sessionRow) {
-          this.db.exec("ROLLBACK");
+          this.rollbackTransaction();
           return false;
         }
         const session = parseWithBigInts<TradingSession>(sessionRow.payload_json);
@@ -1652,7 +1726,7 @@ export class TradingDatabase {
           session.executionMode !== "live" ||
           session.remainingBudgetMicros < proposal.maxLossMicros
         ) {
-          this.db.exec("ROLLBACK");
+          this.rollbackTransaction();
           return false;
         }
 
@@ -1671,7 +1745,7 @@ export class TradingDatabase {
           )
           .run(newStatus, stringifyWithBigInts(updatedSession), proposal.sessionId);
         if (sessionUpdate.changes !== 1) {
-          this.db.exec("ROLLBACK");
+          this.rollbackTransaction();
           return false;
         }
       }
@@ -1701,7 +1775,7 @@ export class TradingDatabase {
         .run(proposalId, proposalHash, nowMs);
 
       if (transitioned.changes !== 1 || execution.changes !== 1) {
-        this.db.exec("ROLLBACK");
+        this.rollbackTransaction();
         return false;
       }
 
@@ -1710,10 +1784,10 @@ export class TradingDatabase {
         sessionId,
         claimedAtMs: nowMs
       });
-      this.db.exec("COMMIT");
+      this.commitTransaction();
       return true;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollbackTransaction();
       throw error;
     }
   }
@@ -1753,40 +1827,150 @@ export class TradingDatabase {
   }
 
   appendAudit(eventType: string, subjectId: string | null, payload: unknown): string {
-    const previous = this.db
-      .prepare("SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1")
-      .get() as { event_hash: string } | undefined;
-    const createdAtMs = Date.now();
-    const payloadJson = stringifyWithBigInts(payload);
-    const previousHash = previous?.event_hash ?? "GENESIS";
-    const eventHash = createHash("sha256")
-      .update(
-        stringifyWithBigInts({
-          previousHash,
-          eventType,
-          subjectId,
-          createdAtMs,
-          payload
-        })
-      )
-      .digest("hex");
-    this.db
-      .prepare(
-        `INSERT INTO audit_events
-          (created_at_ms, event_type, subject_id, payload_json, previous_hash, event_hash)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      )
-      .run(createdAtMs, eventType, subjectId, payloadJson, previousHash, eventHash);
-    return eventHash;
+    const ownsTransaction = !this.transactionActive;
+    if (ownsTransaction) {
+      this.beginImmediate();
+    }
+    try {
+      const previous = this.db
+        .prepare("SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1")
+        .get() as { event_hash: string } | undefined;
+      const createdAtMs = Date.now();
+      const payloadJson = stringifyWithBigInts(payload);
+      const previousHash = previous?.event_hash ?? "GENESIS";
+      const eventHash = createHash("sha256")
+        .update(
+          stringifyWithBigInts({
+            previousHash,
+            eventType,
+            subjectId,
+            createdAtMs,
+            payload
+          })
+        )
+        .digest("hex");
+      this.db
+        .prepare(
+          `INSERT INTO audit_events
+            (created_at_ms, event_type, subject_id, payload_json, previous_hash, event_hash)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(createdAtMs, eventType, subjectId, payloadJson, previousHash, eventHash);
+      if (ownsTransaction) {
+        this.commitTransaction();
+      }
+      return eventHash;
+    } catch (error) {
+      if (ownsTransaction) {
+        this.rollbackTransaction();
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Records an append-only fork repair. Existing events are never rewritten or
+   * deleted: a valid self-hash is required for every preserved event, and the
+   * marker makes the exact first divergent id and prefix tip auditable. A
+   * payload/hash tamper still blocks repair and leaves live closed.
+   */
+  reconcileAuditChain(nowMs = Date.now()): {
+    reconciled: boolean;
+    firstInvalidEventId: number | null;
+    markerHash: string | null;
+  } {
+    const rows = this.auditRows();
+    const marker = rows.find((row) => row.event_type === AUDIT_RECONCILIATION_EVENT);
+    if (marker !== undefined) {
+      return {
+        reconciled: false,
+        firstInvalidEventId: null,
+        markerHash: marker.event_hash
+      };
+    }
+    let previousHash = "GENESIS";
+    let firstInvalidEventId: number | null = null;
+    for (const row of rows) {
+      if (!verifyAuditRowSelfHash(row)) {
+        throw new Error("AUDIT_CHAIN_TAMPERED");
+      }
+      if (firstInvalidEventId === null && row.previous_hash !== previousHash) {
+        firstInvalidEventId = row.id;
+      }
+      previousHash = row.event_hash;
+    }
+    if (firstInvalidEventId === null) {
+      return { reconciled: false, firstInvalidEventId: null, markerHash: null };
+    }
+    const prefix = rows.find((row) => row.id === firstInvalidEventId - 1);
+    const markerHash = this.appendAudit(AUDIT_RECONCILIATION_EVENT, null, {
+      firstInvalidEventId,
+      prefixTipHash: prefix?.event_hash ?? "GENESIS",
+      preservedEventCount: rows.length,
+      reconciledAtMs: nowMs,
+      reason: "CONCURRENT_APPEND_FORK_PRESERVED_APPEND_ONLY"
+    });
+    return { reconciled: true, firstInvalidEventId, markerHash };
   }
 
   verifyAuditChain(): boolean {
-    const rows = this.db
+    const rows = this.auditRows();
+    const markerIndex = rows.findIndex(
+      (row) => row.event_type === AUDIT_RECONCILIATION_EVENT
+    );
+    let firstInvalidEventId: number | null = null;
+    if (markerIndex >= 0) {
+      const markerPayload = parseWithBigInts<Record<string, unknown>>(
+        rows[markerIndex]!.payload_json
+      );
+      const candidate = markerPayload.firstInvalidEventId;
+      if (
+        typeof candidate !== "number" ||
+        !Number.isSafeInteger(candidate) ||
+        candidate <= 0
+      ) {
+        return false;
+      }
+      firstInvalidEventId = candidate;
+    }
+    let previousHash = "GENESIS";
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]!;
+      if (!verifyAuditRowSelfHash(row)) {
+        return false;
+      }
+      const afterForkMarker = markerIndex >= 0 && index > markerIndex;
+      const beforeDeclaredFork =
+        markerIndex >= 0 && row.id < firstInvalidEventId!;
+      const atOrBeforeNormalChain = markerIndex < 0 || beforeDeclaredFork;
+      if (atOrBeforeNormalChain && row.previous_hash !== previousHash) {
+        return false;
+      }
+      if (markerIndex >= 0 && index === markerIndex && row.previous_hash !== previousHash) {
+        return false;
+      }
+      if (afterForkMarker && row.previous_hash !== previousHash) return false;
+      previousHash = row.event_hash;
+    }
+    return true;
+  }
+
+  private auditRows(): Array<{
+    id: number;
+    created_at_ms: number;
+    event_type: string;
+    subject_id: string | null;
+    payload_json: string;
+    previous_hash: string;
+    event_hash: string;
+  }> {
+    return this.db
       .prepare(
-        `SELECT created_at_ms, event_type, subject_id, payload_json, previous_hash, event_hash
+        `SELECT id, created_at_ms, event_type, subject_id, payload_json, previous_hash, event_hash
          FROM audit_events ORDER BY id ASC`
       )
       .all() as Array<{
+      id: number;
       created_at_ms: number;
       event_type: string;
       subject_id: string | null;
@@ -1794,29 +1978,6 @@ export class TradingDatabase {
       previous_hash: string;
       event_hash: string;
     }>;
-    let previousHash = "GENESIS";
-    for (const row of rows) {
-      if (row.previous_hash !== previousHash) {
-        return false;
-      }
-      const payload = parseWithBigInts(row.payload_json);
-      const expected = createHash("sha256")
-        .update(
-          stringifyWithBigInts({
-            previousHash,
-            eventType: row.event_type,
-            subjectId: row.subject_id,
-            createdAtMs: row.created_at_ms,
-            payload
-          })
-        )
-        .digest("hex");
-      if (expected !== row.event_hash) {
-        return false;
-      }
-      previousHash = row.event_hash;
-    }
-    return true;
   }
 
   private expireInterruptedExecutions(nowMs: number): void {
@@ -1857,6 +2018,41 @@ export class TradingDatabase {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms`
       )
       .run(key, value, nowMs);
+  }
+
+  private beginImmediate(): void {
+    if (this.transactionActive) {
+      throw new Error("NESTED_DATABASE_TRANSACTION");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    this.transactionActive = true;
+  }
+
+  /** Used by the onboarding reconciliation transaction so audit appends share
+   * the same SQLite write lock as the state transition. */
+  beginImmediateTransaction(): void {
+    this.beginImmediate();
+  }
+
+  private commitTransaction(): void {
+    this.db.exec("COMMIT");
+    this.transactionActive = false;
+  }
+
+  commitDatabaseTransaction(): void {
+    this.commitTransaction();
+  }
+
+  private rollbackTransaction(): void {
+    try {
+      this.db.exec("ROLLBACK");
+    } finally {
+      this.transactionActive = false;
+    }
+  }
+
+  rollbackDatabaseTransaction(): void {
+    this.rollbackTransaction();
   }
 
   private getState(key: string): string | null {
@@ -1977,6 +2173,15 @@ export class TradingDatabase {
         payload_json TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS market_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_id TEXT NOT NULL,
+        condition_id TEXT NOT NULL,
+        captured_at_ms INTEGER NOT NULL,
+        snapshot_hash TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS legacy_import_reports (
         id TEXT PRIMARY KEY,
         token_id TEXT NOT NULL,
@@ -2002,6 +2207,8 @@ export class TradingDatabase {
         ON exit_reservations(token_id);
       CREATE INDEX IF NOT EXISTS idx_research_bundles_market
         ON research_bundles(market_condition_id, token_id, expires_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_market_snapshots_token_time
+        ON market_snapshots(token_id, captured_at_ms);
       CREATE INDEX IF NOT EXISTS idx_legacy_import_reports_token
         ON legacy_import_reports(token_id, imported_at_ms);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_clob_order_id
@@ -2034,6 +2241,33 @@ function ensureColumn(
     .all() as Array<{ name: string }>;
   if (!columns.some((candidate) => candidate.name === column)) {
     database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+function verifyAuditRowSelfHash(row: {
+  created_at_ms: number;
+  event_type: string;
+  subject_id: string | null;
+  payload_json: string;
+  previous_hash: string;
+  event_hash: string;
+}): boolean {
+  try {
+    const payload = parseWithBigInts(row.payload_json);
+    const expected = createHash("sha256")
+      .update(
+        stringifyWithBigInts({
+          previousHash: row.previous_hash,
+          eventType: row.event_type,
+          subjectId: row.subject_id,
+          createdAtMs: row.created_at_ms,
+          payload
+        })
+      )
+      .digest("hex");
+    return expected === row.event_hash;
+  } catch {
+    return false;
   }
 }
 

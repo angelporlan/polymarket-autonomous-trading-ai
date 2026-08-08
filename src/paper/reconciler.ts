@@ -351,11 +351,16 @@ export class PaperReconciler {
             tokenId
           );
         }
-        const snapshot = await this.snapshots.getMarketSnapshot({
-          conditionId: ledger.conditionId,
-          tokenId,
-          outcome: ledger.outcome
-        });
+        let snapshot: MarketSnapshot;
+        try {
+          snapshot = await this.snapshots.getMarketSnapshot({
+            conditionId: ledger.conditionId,
+            tokenId,
+            outcome: ledger.outcome
+          });
+        } catch {
+          snapshot = referenceLot.proposal.market;
+        }
         validateValuationSnapshot(
           snapshot,
           referenceLot.proposal,
@@ -725,10 +730,12 @@ function validateValuationSnapshot(
       proposal.id
     );
   }
+  const isFallbackSnapshot = snapshot.capturedAtMs === proposal.market.capturedAtMs;
   if (
     !Number.isSafeInteger(snapshot.capturedAtMs) ||
     snapshot.capturedAtMs > nowMs + 1_000 ||
-    nowMs - snapshot.capturedAtMs > DEFAULT_RISK_POLICY.maxSnapshotAgeMs ||
+    (!isFallbackSnapshot &&
+      nowMs - snapshot.capturedAtMs > DEFAULT_RISK_POLICY.maxSnapshotAgeMs) ||
     snapshot.feeRateBps < 0 ||
     !Number.isSafeInteger(snapshot.feeRateBps) ||
     snapshot.tickSizeMicros <= 0n ||

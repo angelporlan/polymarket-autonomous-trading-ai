@@ -541,14 +541,18 @@ export class PolymarketRuntime {
   }
 
   /**
-   * Narrow entry point for the detached risk-reduction daemon. It deliberately
-   * has no session creation, entry staging, or arbitrary signing capability.
+   * Entry point for the detached local daemon. It evaluates deterministic
+   * entries, then supervises exits; session creation, research fetching and
+   * arbitrary signing remain outside this loop.
    */
   async runSupervisorCycle(): Promise<SupervisorCycleResult> {
     this.requireProfile();
     const reconciliationActive = this.config.liveEnabled
       ? await this.service.monitorLiveSafety()
       : false;
+    const entry = await this.service.runAutonomousEntryCycle(
+      this.config.liveEnabled ? "live" : "paper"
+    );
     const result = await this.service.supervisePositions();
     const priorityReevaluation = result.actions.some(
       (action) => action.triggerReason === "RESEARCH_REQUIRED"
@@ -566,7 +570,11 @@ export class PolymarketRuntime {
       })),
       evaluatedAt: new Date().toISOString(),
       reconciliationActive,
-      priorityReevaluation
+      priorityReevaluation,
+      entryEvaluatedCandidatesCount: entry.evaluatedCandidatesCount,
+      entryStagedCount: entry.stagedCount,
+      entryExecutedCount: entry.executedCount,
+      entrySkippedCount: entry.skippedCount
     };
   }
 
