@@ -26,6 +26,30 @@ import {
 
 export const PAPER_RECONCILIATION_VERSION = "paper-reconciliation-v1";
 
+/**
+ * These codes describe a candidate screened out before a paper order or
+ * position existed. They remain in the audit trail, but are not hard-risk
+ * failures for the paper gate.
+ */
+const NON_EXECUTING_SCREENING_CODES = new Set([
+  "RULES_INCOMPLETE",
+  "EDGE_TOO_SMALL",
+  "INSUFFICIENT_DEPTH"
+]);
+
+export function isHardPaperRiskViolationPayload(payload: unknown): boolean {
+  if (typeof payload !== "object" || payload === null) {
+    return true;
+  }
+  const codes = (payload as { codes?: unknown }).codes;
+  if (!Array.isArray(codes) || codes.length === 0) {
+    return true;
+  }
+  return codes.some(
+    (code) => typeof code !== "string" || !NON_EXECUTING_SCREENING_CODES.has(code)
+  );
+}
+
 export interface PaperSnapshotSource {
   getMarketSnapshot(reference: {
     conditionId: string;
@@ -576,15 +600,18 @@ export class ReconciledPaperGate {
       }
     }
 
+    const riskViolations = this.database
+      .listAuditEvents()
+      .filter((event) => event.eventType === "PAPER_RISK_VIOLATION")
+      .filter((event) => isHardPaperRiskViolationPayload(event.payload)).length;
+
     return {
       firstTradeAtMs: latest?.firstFilledOperationAtMs ?? null,
       totalTrades: latest?.filledOperationCount ?? 0,
       closedTrades: latest?.matchedSellOperationCount ?? 0,
       netPnlMicros: latest?.netPnlMicros ?? 0n,
       maxDrawdownMicros,
-      riskViolations: this.database.countAuditEvents(
-        "PAPER_RISK_VIOLATION"
-      ),
+      riskViolations,
       reconciliationErrors:
         this.database.countAuditEvents("PAPER_RECONCILIATION_ERROR") +
         (this.database.verifyAuditChain() ? 0 : 1)

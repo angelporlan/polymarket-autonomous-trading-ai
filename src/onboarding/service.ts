@@ -14,13 +14,17 @@ import {
   zonedDayKey,
   zonedDayStartMs
 } from "../application/risk-context.js";
-import { verifyProposalHash } from "../domain/proposals.js";
-import { DEFAULT_RISK_POLICY } from "../domain/risk-policy.js";
+import { hashCanonical, verifyProposalHash } from "../domain/proposals.js";
+import {
+  DEFAULT_RISK_POLICY,
+  RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD
+} from "../domain/risk-policy.js";
 import {
   canonicalCorrelationKey,
   type ExecutionRecord,
   type OrderProposal,
-  type PortfolioPosition
+  type PortfolioPosition,
+  type PortfolioSnapshot
 } from "../domain/types.js";
 import { PolymarketPublicClient } from "../polymarket/public-client.js";
 import {
@@ -44,6 +48,8 @@ const REQUEST_TIMEOUT_MS = 8_000;
 const CREDENTIAL_SETUP_TIMEOUT_MS = 90_000;
 const MAX_CREDENTIAL_RECORD_BYTES = 16_384;
 const DAILY_SESSION_TIME_ZONE = "Europe/Madrid";
+export const ADOPT_EXISTING_PORTFOLIO_CONFIRMATION =
+  "ADOPT_EXISTING_PORTFOLIO";
 const OPEN_EXECUTION_STATUSES = new Set([
   "DELAYED",
   "FILLED",
@@ -221,14 +227,26 @@ export class OnboardingService {
         "The isolated wallet already exceeds the conservative loss threshold."
       );
     }
+    if (portfolioExposureMicros(portfolio) > RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD) {
+      throw new Error(
+        "The existing portfolio exceeds the fixed total-exposure ceiling."
+      );
+    }
     const hasOpenPositions = portfolio.positions.some((position) => {
       if (position.sizeMicros < 0n) {
         throw new Error("The portfolio contains an invalid open position.");
       }
       return position.sizeMicros > 0n;
     });
+    const adoption = this.database.getLivePortfolioAdoption();
+    const adoptedExistingPortfolio = isPortfolioAdoptionCurrent(
+      adoption,
+      this.config.profileAddress,
+      dayKey,
+      portfolio
+    );
     if (!existingDailyRisk.known) {
-      if (hasOpenPositions) {
+      if (hasOpenPositions && !adoptedExistingPortfolio) {
         throw new Error(
           "A new daily risk session requires zero open positions."
         );
@@ -253,7 +271,8 @@ export class OnboardingService {
     }
     assertOpenPositionsHaveLocalProvenance(
       this.database,
-      portfolio.positions
+      portfolio.positions,
+      adoptedExistingPortfolio
     );
     const dailyRisk = this.database.getDailyRiskPnl(
       dayKey,
@@ -268,6 +287,90 @@ export class OnboardingService {
       );
     }
     this.database.setLiveActivation(true, nowMs);
+  }
+
+  async adoptExistingPortfolio(
+    confirmPhrase: string,
+    paperGatePassed: boolean
+  ): Promise<void> {
+    if (confirmPhrase !== ADOPT_EXISTING_PORTFOLIO_CONFIRMATION) {
+      throw new Error(
+        `Exact ${ADOPT_EXISTING_PORTFOLIO_CONFIRMATION} confirmation is required.`
+      );
+    }
+    if (!this.config.liveEnabled) {
+      throw new Error("POLYMARKET_LIVE_ENABLED is false.");
+    }
+    if (!paperGatePassed) {
+      throw new Error("The paper gate has not passed.");
+    }
+    if (!this.database.verifyAuditChain()) {
+      throw new Error("The audit chain is invalid.");
+    }
+    if (this.database.getEmergencyStop().active) {
+      throw new Error("The emergency stop is active.");
+    }
+    if (this.database.getCooldown().untilMs > Date.now()) {
+      throw new Error("The 24-hour loss cooldown is still active.");
+    }
+
+    const nowMs = Date.now();
+    const dayKey = zonedDayKey(nowMs, DAILY_SESSION_TIME_ZONE);
+    if (this.database.getDailyRiskPnl(dayKey, 0n).known) {
+      throw new Error("The daily risk session is already armed.");
+    }
+    const portfolio = await this.createPublicClient().getPortfolio(
+      this.config.profileAddress
+    );
+    if (portfolio.positions.some((position) => position.sizeMicros < 0n)) {
+      throw new Error("The portfolio contains an invalid open position.");
+    }
+    const openPositions = portfolio.positions.filter(
+      (position) => position.sizeMicros > 0n
+    );
+    if (openPositions.length === 0) {
+      throw new Error("No open positions are available for adoption.");
+    }
+    if (portfolio.totalPnlMicros <= -DEFAULT_RISK_POLICY.dailyStopMicros) {
+      throw new Error(
+        "The isolated wallet already exceeds the conservative loss threshold."
+      );
+    }
+    if (portfolioExposureMicros(portfolio) > RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD) {
+      throw new Error(
+        "The existing portfolio exceeds the fixed total-exposure ceiling."
+      );
+    }
+    const activity = await this.createPublicClient().getUserActivity(
+      this.config.profileAddress,
+      zonedDayStartMs(nowMs, DAILY_SESSION_TIME_ZONE)
+    );
+    if (!Array.isArray(activity)) {
+      throw new Error("The daily trade-activity response was malformed.");
+    }
+    if (activity.length !== 0) {
+      throw new Error(
+        "Portfolio adoption requires zero TRADE activity since midnight Europe/Madrid."
+      );
+    }
+
+    const binding = this.requireCurrentBinding();
+    const creds = await this.readStoredL2Credentials(
+      "Confirm adoption of the existing Polymarket portfolio"
+    );
+    const closedOnly = await runBoundedAuthenticatedRequest(
+      this.createReadOnlyClient(creds, binding).getClosedOnlyMode(),
+      "Authenticated portfolio adoption state check failed."
+    );
+    assertAccountCanOpenOrders(closedOnly);
+
+    this.database.setLivePortfolioAdoption({
+      profileAddress: this.config.profileAddress,
+      dayKey,
+      adoptedAtMs: nowMs,
+      portfolioHash: portfolioIdentityHash(portfolio),
+      positionKeys: openPositions.map(positionIdentity).sort()
+    }, nowMs);
   }
 
   deactivateLive(): void {
@@ -907,7 +1010,8 @@ function assertRemoteTerminalOrderMatchesProposal(
 
 function assertOpenPositionsHaveLocalProvenance(
   database: TradingDatabase,
-  positions: PortfolioPosition[]
+  positions: PortfolioPosition[],
+  adoptedExistingPortfolio = false
 ): void {
   const executions = database.listExecutions();
   for (const position of positions) {
@@ -915,6 +1019,9 @@ function assertOpenPositionsHaveLocalProvenance(
       throw new Error("The portfolio contains an invalid open position.");
     }
     if (position.sizeMicros === 0n) {
+      continue;
+    }
+    if (adoptedExistingPortfolio) {
       continue;
     }
     const correlationKeys = new Set<string>();
@@ -950,6 +1057,69 @@ function assertOpenPositionsHaveLocalProvenance(
       );
     }
   }
+}
+
+function positionIdentity(
+  position: Pick<PortfolioPosition, "conditionId" | "tokenId">
+): string {
+  return `${position.conditionId.toLowerCase()}:${position.tokenId}`;
+}
+
+function portfolioIdentityHash(portfolio: PortfolioSnapshot): string {
+  return hashCanonical({
+    profileAddress: portfolio.profileAddress.toLowerCase(),
+    positions: portfolio.positions
+      .filter((position) => position.sizeMicros > 0n)
+      .map((position) => ({
+        conditionId: position.conditionId.toLowerCase(),
+        tokenId: position.tokenId,
+        outcome: position.outcome,
+        sizeMicros: position.sizeMicros,
+        averagePriceMicros: position.averagePriceMicros
+      }))
+      .sort((left, right) =>
+        `${left.conditionId}:${left.tokenId}`.localeCompare(
+          `${right.conditionId}:${right.tokenId}`
+        )
+      )
+  });
+}
+
+function portfolioExposureMicros(portfolio: PortfolioSnapshot): bigint {
+  return portfolio.positions.reduce((total, position) => {
+    const costBasis =
+      (position.sizeMicros * position.averagePriceMicros + 999_999n) /
+      1_000_000n;
+    const exposure =
+      costBasis > position.currentValueMicros
+        ? costBasis
+        : position.currentValueMicros;
+    return total + exposure;
+  }, 0n);
+}
+
+function isPortfolioAdoptionCurrent(
+  adoption: ReturnType<TradingDatabase["getLivePortfolioAdoption"]>,
+  profileAddress: string,
+  dayKey: string,
+  portfolio: PortfolioSnapshot
+): boolean {
+  if (
+    adoption === null ||
+    adoption.profileAddress !== profileAddress ||
+    adoption.dayKey !== dayKey ||
+    adoption.portfolioHash !== portfolioIdentityHash(portfolio)
+  ) {
+    return false;
+  }
+  const currentKeys = portfolio.positions
+    .filter((position) => position.sizeMicros > 0n)
+    .map(positionIdentity)
+    .sort();
+  return (
+    currentKeys.length === adoption.positionKeys.length &&
+    currentKeys.every((key, index) => key === adoption.positionKeys[index])
+  );
 }
 
 function assertNoOutstandingLocalExecutions(

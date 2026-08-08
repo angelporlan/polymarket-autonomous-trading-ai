@@ -8,7 +8,8 @@ import {
 import {
   PaperReconciler,
   PaperReconciliationError,
-  ReconciledPaperGate
+  ReconciledPaperGate,
+  isHardPaperRiskViolationPayload
 } from "../src/paper/reconciler.js";
 import { PaperSimulator } from "../src/paper/simulator.js";
 import { TradingDatabase } from "../src/storage/database.js";
@@ -46,6 +47,21 @@ function stageFilledTrade(
 }
 
 describe("paper reconciler", () => {
+  it("does not treat non-executing screening rejects as hard risk violations", () => {
+    expect(
+      isHardPaperRiskViolationPayload({ codes: ["RULES_INCOMPLETE"] })
+    ).toBe(false);
+    expect(
+      isHardPaperRiskViolationPayload({
+        codes: ["INSUFFICIENT_DEPTH", "EDGE_TOO_SMALL"]
+      })
+    ).toBe(false);
+    expect(
+      isHardPaperRiskViolationPayload({ codes: ["TOTAL_EXPOSURE"] })
+    ).toBe(true);
+    expect(isHardPaperRiskViolationPayload({ codes: [] })).toBe(true);
+  });
+
   it("values a partial fill from executable fresh bids", async () => {
     const nowMs = Date.now();
     const database = new TradingDatabase(":memory:");

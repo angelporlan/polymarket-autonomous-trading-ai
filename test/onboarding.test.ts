@@ -16,6 +16,7 @@ import type {
   UserTradeActivity
 } from "../src/domain/types.js";
 import {
+  ADOPT_EXISTING_PORTFOLIO_CONFIRMATION,
   OnboardingService,
   type OnboardingServiceDependencies
 } from "../src/onboarding/service.js";
@@ -345,6 +346,60 @@ describe("OnboardingService live activation provenance", () => {
 
     expect(database.getLiveActivation().active).toBe(false);
     expect(database.countAuditEvents("DAILY_RISK_SESSION_ARMED")).toBe(0);
+  });
+
+  it("adopts an existing portfolio only after a clean day and then arms risk", async () => {
+    const database = createDatabase();
+    setBinding(database);
+    const portfolio = portfolioFixture([positionFixture()]);
+    const service = createService(database, {}, portfolio);
+
+    await service.adoptExistingPortfolio(
+      ADOPT_EXISTING_PORTFOLIO_CONFIRMATION,
+      true
+    );
+
+    expect(database.getLivePortfolioAdoption()).toMatchObject({
+      profileAddress: PROFILE_ADDRESS,
+      dayKey: zonedDayKey(Date.now(), "Europe/Madrid"),
+      positionKeys: [
+        `${portfolio.positions[0]!.conditionId.toLowerCase()}:${portfolio.positions[0]!.tokenId}`
+      ]
+    });
+    expect(database.getLiveActivation().active).toBe(false);
+
+    await service.activateLive("ACTIVATE_LIVE", true);
+
+    expect(database.getLiveActivation().active).toBe(true);
+    expect(database.countAuditEvents("LIVE_PORTFOLIO_ADOPTED")).toBe(1);
+    expect(database.countAuditEvents("DAILY_RISK_SESSION_ARMED")).toBe(1);
+  });
+
+  it("does not adopt a portfolio after same-day trade activity", async () => {
+    const database = createDatabase();
+    setBinding(database);
+    const service = createService(
+      database,
+      {
+        publicClientFactory: () => ({
+          async getPortfolio() {
+            return portfolioFixture([positionFixture()]);
+          },
+          async getUserActivity() {
+            return [tradeActivityFixture()];
+          }
+        })
+      },
+      portfolioFixture([positionFixture()])
+    );
+
+    await expect(
+      service.adoptExistingPortfolio(
+        ADOPT_EXISTING_PORTFOLIO_CONFIRMATION,
+        true
+      )
+    ).rejects.toThrow(/zero TRADE activity since midnight Europe\/Madrid/i);
+    expect(database.getLivePortfolioAdoption()).toBeNull();
   });
 
   it("blocks a new daily risk session when TRADE activity exists since Madrid midnight", async () => {

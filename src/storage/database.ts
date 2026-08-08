@@ -86,6 +86,14 @@ export interface AccountBindingRecord {
   verifiedAtMs: number;
 }
 
+export interface LivePortfolioAdoptionRecord {
+  profileAddress: string;
+  dayKey: string;
+  adoptedAtMs: number;
+  portfolioHash: string;
+  positionKeys: string[];
+}
+
 const AUDIT_RECONCILIATION_EVENT = "AUDIT_CHAIN_RECONCILIATED";
 
 export class TradingDatabase {
@@ -880,6 +888,42 @@ export class TradingDatabase {
   getLiveActivation(): { active: boolean; updatedAtMs: number } {
     const value = this.getState("live_activation");
     return value ? parseWithBigInts(value) : { active: false, updatedAtMs: 0 };
+  }
+
+  setLivePortfolioAdoption(
+    adoption: LivePortfolioAdoptionRecord,
+    nowMs = adoption.adoptedAtMs
+  ): void {
+    if (!/^0x[a-f0-9]{40}$/u.test(adoption.profileAddress)) {
+      throw new Error("Invalid portfolio adoption profile address.");
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(adoption.dayKey)) {
+      throw new Error("Invalid portfolio adoption day key.");
+    }
+    if (!/^[a-f0-9]{64}$/u.test(adoption.portfolioHash)) {
+      throw new Error("Invalid portfolio adoption hash.");
+    }
+    if (adoption.positionKeys.length === 0) {
+      throw new Error("Portfolio adoption requires at least one position.");
+    }
+    this.setState(
+      "live_portfolio_adoption",
+      stringifyWithBigInts(adoption),
+      nowMs
+    );
+    this.appendAudit("LIVE_PORTFOLIO_ADOPTED", null, {
+      profileAddress: adoption.profileAddress,
+      dayKey: adoption.dayKey,
+      portfolioHash: adoption.portfolioHash,
+      positionCount: adoption.positionKeys.length
+    });
+  }
+
+  getLivePortfolioAdoption(): LivePortfolioAdoptionRecord | null {
+    const value = this.getState("live_portfolio_adoption");
+    return value
+      ? parseWithBigInts<LivePortfolioAdoptionRecord>(value)
+      : null;
   }
 
   setAccountBinding(binding: AccountBindingRecord): void {

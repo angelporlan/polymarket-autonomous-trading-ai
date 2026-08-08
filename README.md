@@ -224,10 +224,13 @@ Ejecuta los pasos desde un shell con la misma configuración no secreta que usar
 npm run onboard -- status
 npm run onboard -- import-key
 npm run onboard -- configure
+npm run onboard -- adopt-existing-portfolio --confirm ADOPT_EXISTING_PORTFOLIO
 npm run onboard -- activate-live --confirm ACTIVATE_LIVE
 ```
 
 `import-key` abre la interfaz nativa oculta y escribe directamente en el Llavero. `configure` comprueba signer, funder, perfil y tipo de wallet; usa `--confirm-legacy-proxy` solo cuando la comprobación explícita determine que la cuenta existente es el proxy legado tipo 1. `activate-live` seguirá fallando hasta que la puerta paper y el resto de controles estén satisfechos.
+
+Si la cuenta ya tiene posiciones abiertas, `adopt-existing-portfolio` permite establecer un baseline diario verificable sin introducir un saldo manual ni mover fondos. Exige cartera pública consistente, cero actividad desde medianoche de `Europe/Madrid`, cuenta autenticada en modo que permita órdenes, auditoría válida, cooldown inactivo y exposición por debajo del techo fijo. Guarda únicamente un hash de identidad de las posiciones; cualquier cambio externo invalida la adopción. Las posiciones adoptadas sin procedencia local siguen bloqueadas para salidas automáticas hasta que se reconcilien.
 
 Para cerrar live o revisar un incidente:
 

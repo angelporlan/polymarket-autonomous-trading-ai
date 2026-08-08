@@ -75,6 +75,20 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           );
           break;
         }
+      case "adopt-existing-portfolio":
+        {
+          const paperGateResult = await paperGate.result(
+            config.paperGateSkip
+          );
+          await service.adoptExistingPortfolio(
+            optionValue(argv, "--confirm"),
+            paperGateResult.passed
+          );
+          process.stdout.write(
+            "Cartera existente adoptada localmente; live permanece desactivado.\n"
+          );
+          break;
+        }
       case "deactivate-live":
         service.deactivateLive();
         process.stdout.write("Live desactivado localmente.\n");
@@ -87,7 +101,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         break;
       default:
         throw new Error(
-          "Uso: onboard status|import-key|configure [--confirm-legacy-proxy]|activate-live --confirm ACTIVATE_LIVE|deactivate-live|clear-emergency --confirm CLEAR_EMERGENCY"
+          "Uso: onboard status|import-key|configure [--confirm-legacy-proxy]|adopt-existing-portfolio --confirm ADOPT_EXISTING_PORTFOLIO|activate-live --confirm ACTIVATE_LIVE|deactivate-live|clear-emergency --confirm CLEAR_EMERGENCY"
         );
     }
   } finally {

@@ -55,6 +55,7 @@ Gate de salida: 7 días sin incidentes de seguridad o conciliación y revisión 
 Solo después de completar los gates anteriores y de que las barreras de onboarding permitan la activación:
 
 - [ ] Usar una cuenta social compatible tipo `POLY_PROXY` o `POLY_1271` y capital experimental limitado.
+- [ ] Si ya existen posiciones, ejecutar `npm run onboard -- adopt-existing-portfolio --confirm ADOPT_EXISTING_PORTFOLIO` tras verificar cartera pública y cero actividad desde medianoche de `Europe/Madrid`.
 - [ ] Activar una sesión con presupuesto explícito y mínimo; no ampliar ni renovar el presupuesto durante la sesión.
 - [ ] Limitar las primeras 5 operaciones a 1 pUSD por orden y una posición simultánea.
 - [ ] Mantener `PAPER_GATE_SKIP=false`.
