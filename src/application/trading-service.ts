@@ -65,7 +65,7 @@ import {
   type LegacyLocalFill
 } from "../domain/legacy-import.js";
 import { PaperSimulator } from "../paper/simulator.js";
-import { zonedDayStartMs } from "./risk-context.js";
+import { zonedDayKey, zonedDayStartMs } from "./risk-context.js";
 import {
   normalizeClobOrderStatus,
   normalizeClobTradeStatus,
@@ -108,11 +108,16 @@ export interface TradingServiceOptions {
   liveEnvironmentEnabled: boolean;
   database: TradingDatabase;
   marketData: MarketDataPort;
+  /** Public WebSocket-backed snapshot path reserved for agent-supervised live orders. */
+  getAgentMarketSnapshot?: (
+    reference: MarketReference
+  ) => Promise<MarketSnapshot>;
   accountBinding: AccountBindingPort;
   riskContexts: RiskContextPort;
   paperGate: PaperGatePort;
   /** Explicit non-secret override; never replaces the other live barriers. */
   paperGateSkip?: boolean;
+  paperGateSkipSource?: "dotenv" | "environment" | "default";
   liveTrading: LiveTradingPort | null;
   onchainSettlement: OnchainSettlementPort;
   paperSimulator?: PaperSimulator;
@@ -145,7 +150,9 @@ export class TradingService {
       this.options.accountBinding.signatureType(),
       this.options.accountBinding.funderAddress(),
       this.options.liveTrading?.configured() ?? Promise.resolve(false),
-      this.options.paperGate.result(this.options.paperGateSkip ?? false)
+      this.options.paperGate.result(
+        this.options.paperGateSkip === true && this.options.paperGateSkipSource === "dotenv"
+      )
     ]);
     const emergencyStopped = this.options.database.getEmergencyStop().active;
     const localLiveActivation = this.options.database.getLiveActivation().active;
@@ -154,6 +161,7 @@ export class TradingService {
       profileExists &&
       localLiveActivation &&
       paperGate.passed &&
+      (this.options.paperGateSkip !== true || this.options.paperGateSkipSource === "dotenv") &&
       signerConfigured &&
       liveConfigured &&
       !emergencyStopped;
@@ -326,18 +334,16 @@ export class TradingService {
     }>;
   }> {
     const nowMs = this.now();
-    if (executionMode === "live") {
-      const agentRun = this.options.database.getAgentRun(nowMs);
-      if (agentRun?.status === "ACTIVE") {
-        // The agent lease owns entries exclusively. The daemon continues exits.
-        return {
-          evaluatedCandidatesCount: 0,
-          stagedCount: 0,
-          executedCount: 0,
-          skippedCount: 1,
-          decisions: []
-        };
-      }
+    if (String(executionMode) === "live") {
+      // Live entries are conversation-owned. The detached daemon only
+      // reconciles and supervises positions; it never invents entries.
+      return {
+        evaluatedCandidatesCount: 0,
+        stagedCount: 0,
+        executedCount: 0,
+        skippedCount: 1,
+        decisions: []
+      };
     }
     const session = this.options.database.getActiveTradingSession(executionMode, nowMs);
     if (session === null) {
@@ -568,7 +574,9 @@ export class TradingService {
     const [summary, paperMetrics, paperResult] = await Promise.all([
       this.options.riskContexts.summary(),
       this.options.paperGate.metrics(),
-      this.options.paperGate.result(this.options.paperGateSkip ?? false)
+      this.options.paperGate.result(
+        this.options.paperGateSkip === true && this.options.paperGateSkipSource === "dotenv"
+      )
     ]);
     return {
       ...summary,
@@ -602,6 +610,16 @@ export class TradingService {
     }
 
     const capacity = await this.getTradingSessionCapacity(input.executionMode);
+    if (input.executionMode === "live" && this.options.paperGateSkip === true) {
+      if (this.options.paperGateSkipSource !== "dotenv") {
+        throw new Error("PAPER_GATE_SKIP_MUST_BE_CONFIGURED_IN_DOTENV");
+      }
+      this.options.database.appendAudit("PAPER_GATE_OVERRIDE_ACTIVE", null, {
+        source: this.options.paperGateSkipSource,
+        sessionMode: input.executionMode,
+        recordedAtMs: nowMs
+      });
+    }
     const challenge = randomBytes(18).toString("hex").toUpperCase();
     const pending = createPendingTradingSession({
       ...capacity,
@@ -714,10 +732,13 @@ export class TradingService {
       RISK_HARD_DAILY_STOP_PUSD,
       dailyLossMicros
     );
+    const policy = executionMode === "live"
+      ? this.options.database.getAgentPolicy().risk
+      : DEFAULT_RISK_POLICY;
     const exposureLimitMicros =
-      summary.liveTradeCount < DEFAULT_RISK_POLICY.canaryTradeCount
-        ? DEFAULT_RISK_POLICY.canaryMaxOpenExposureMicros
-        : DEFAULT_RISK_POLICY.pilotMaxOpenExposureMicros;
+      summary.liveTradeCount < policy.canaryTradeCount
+        ? policy.canaryMaxOpenExposureMicros
+        : policy.pilotMaxOpenExposureMicros;
     const exposureCapacityMicros = maxRemaining(
       exposureLimitMicros,
       summary.totalOpenExposureMicros
@@ -748,7 +769,7 @@ export class TradingService {
 
     const nowMs = this.now();
     const activeAgentRun = this.options.database.getAgentRun(nowMs);
-    if (input.executionMode === "live" && input.intent === "ENTRY") {
+    if (input.executionMode === "live" && (input.intent === "ENTRY" || input.decisionOwner === "agent")) {
       if (activeAgentRun?.status === "ACTIVE") {
         if (
           input.decisionOwner !== "agent" ||
@@ -758,7 +779,7 @@ export class TradingService {
           throw new ProposalRejectedError([
             {
               code: "SESSION_INACTIVE",
-              message: "An active agent lease owns live entries; the proposal must identify that lease."
+              message: "An active agent lease owns agent-supervised live orders; the proposal must identify that lease."
             }
           ]);
         }
@@ -766,10 +787,28 @@ export class TradingService {
         throw new ProposalRejectedError([
           {
             code: "SESSION_INACTIVE",
-            message: "The agent lease is missing or expired; new agent entries are blocked."
+            message: "The agent lease is missing or expired; agent-supervised live orders are blocked."
           }
         ]);
       }
+    }
+    if (
+      input.executionMode === "live" &&
+      input.intent === "ENTRY" &&
+      input.decisionOwner === "agent" &&
+      this.options.database.isGrandfatheredPosition(
+        input.conditionId,
+        input.tokenId,
+        zonedDayKey(nowMs, "Europe/Madrid")
+      )
+    ) {
+      throw new ProposalRejectedError([
+        {
+          code: "INVALID_ORDER_INTENT",
+          message:
+            "An adopted position is grandfathered reduce-only and cannot be increased."
+        }
+      ]);
     }
 
     const activeSession = this.options.database.getActiveTradingSession(input.executionMode, this.now());
@@ -801,7 +840,19 @@ export class TradingService {
       await this.options.paperGate.metrics();
     }
 
-    const snapshot = await this.options.marketData.getMarketSnapshot({
+    const snapshotProvider =
+      input.executionMode === "live" && input.decisionOwner === "agent"
+        ? this.options.getAgentMarketSnapshot
+        : undefined;
+    if (
+      input.executionMode === "live" &&
+      input.decisionOwner === "agent" &&
+      snapshotProvider === undefined
+    ) {
+      throw new Error("MARKET_CHANNEL_UNAVAILABLE");
+    }
+    const snapshot = await (snapshotProvider ??
+      this.options.marketData.getMarketSnapshot.bind(this.options.marketData))({
       conditionId: input.conditionId,
       tokenId: input.tokenId,
       outcome: input.outcome,
@@ -833,11 +884,14 @@ export class TradingService {
     }
     if (input.executionMode === "live" && input.intent === "ENTRY" && input.decisionOwner === "agent") {
       if (
-        researchBundle?.evidenceKind !== "MARKET_DATA" ||
+        (researchBundle?.evidenceKind !== "MARKET_DATA" && researchBundle?.evidenceKind !== "HYBRID") ||
         researchBundle.analysisHash === undefined ||
         researchBundle.modelVersion === undefined ||
         input.analysisHash !== researchBundle.analysisHash ||
-        input.modelVersion !== researchBundle.modelVersion
+        input.modelVersion !== researchBundle.modelVersion ||
+        researchBundle.agentRunId !== input.agentRunId ||
+        researchBundle.agentCycleId === undefined ||
+        researchBundle.candidateSnapshotId === undefined
       ) {
         throw new ProposalRejectedError([
           {
@@ -880,7 +934,13 @@ export class TradingService {
     };
     let proposal: OrderProposal;
     try {
-      proposal = createOrderProposal(intent, context);
+      proposal = createOrderProposal(
+        intent,
+        context,
+        input.executionMode === "live" && input.decisionOwner === "agent"
+          ? this.options.database.getAgentPolicy().risk
+          : DEFAULT_RISK_POLICY
+      );
     } catch (error) {
       if (error instanceof ProposalRejectedError) {
         this.options.database.appendAudit(
@@ -967,17 +1027,19 @@ export class TradingService {
     if (proposal.intent === "ENTRY" && !activeSession) {
       throw new Error("LIVE_AUTONOMY_NOT_READY: No active authorized live trading session found.");
     }
-    if (proposal.intent === "ENTRY") {
+    if (proposal.decisionOwner === "agent") {
       const activeAgentRun = this.options.database.getAgentRun(nowMs);
-      if (proposal.decisionOwner === "agent") {
-        if (
-          proposal.agentRunId === undefined ||
-          activeAgentRun?.status !== "ACTIVE" ||
-          activeAgentRun.agentRunId !== proposal.agentRunId
-        ) {
-          throw new Error("AGENT_RUN_NOT_ACTIVE: Agent lease expired or no longer owns entries.");
-        }
-      } else if (activeAgentRun?.status === "ACTIVE") {
+      if (
+        proposal.agentRunId === undefined ||
+        activeAgentRun?.status !== "ACTIVE" ||
+        activeAgentRun.agentRunId !== proposal.agentRunId ||
+        !this.options.database.isAgentRunActive(proposal.agentRunId, nowMs)
+      ) {
+        throw new Error("AGENT_RUN_NOT_ACTIVE: Agent lease expired or no longer owns this proposal.");
+      }
+    } else if (proposal.intent === "ENTRY") {
+      const activeAgentRun = this.options.database.getAgentRun(nowMs);
+      if (activeAgentRun?.status === "ACTIVE") {
         throw new Error("AGENT_RUN_OWNS_ENTRIES: Deterministic daemon entry is paused while an agent lease is active.");
       }
     }
@@ -1336,18 +1398,22 @@ export class TradingService {
     if (!this.options.database.verifyAuditChain()) {
       throw new Error("AUDIT_CHAIN_INVALID");
     }
-    if (!this.options.liveEnvironmentEnabled) {
-      throw new Error("LIVE_ENVIRONMENT_DISABLED");
-    }
-    if (!this.options.database.getLiveActivation().active) {
-      throw new Error("LOCAL_LIVE_ACTIVATION_MISSING");
-    }
     const initialExecutions = this.options.database.listExecutions();
     const reconciliationOnly = initialExecutions.some(
-      (execution) => execution.status.toUpperCase() === "SUBMISSION_UNKNOWN"
+      (execution) =>
+        execution.status.toUpperCase() === "CLAIMED" ||
+        execution.status.toUpperCase() === "SUBMISSION_UNKNOWN" ||
+        (execution.clobOrderId !== null &&
+          !TERMINAL_MONITORED_STATUSES.has(execution.status.toUpperCase()))
     );
+    if (!this.options.liveEnvironmentEnabled && !reconciliationOnly) {
+      return false;
+    }
+    if (!this.options.database.getLiveActivation().active && !reconciliationOnly) {
+      return false;
+    }
     if (this.options.database.getEmergencyStop().active && !reconciliationOnly) {
-      throw new Error("EMERGENCY_STOPPED");
+      return false;
     }
     const liveTrading = this.options.liveTrading;
     if (liveTrading === null) {
@@ -1358,8 +1424,7 @@ export class TradingService {
       this.now(),
       "Europe/Madrid"
     );
-    const [geo, risk, openOrders, userActivity, portfolio] = await Promise.all([
-      this.options.marketData.checkGeoblock(),
+    const [risk, openOrders, userActivity, portfolio] = await Promise.all([
       this.options.riskContexts.summary(),
       liveTrading.getOpenOrders(),
       this.options.marketData.getUserActivity(
@@ -1368,9 +1433,7 @@ export class TradingService {
       ),
       this.options.marketData.getPortfolio(this.options.profileAddress)
     ]);
-    if (geo.blocked || this.now() - geo.checkedAtMs > 5_000) {
-      throw new Error("GEOBLOCK_BLOCKED_OR_STALE");
-    }
+    const policy = this.options.database.getAgentPolicy().risk;
     if (!reconciliationOnly && !risk.dailyPnlKnown) {
       throw new Error("DAILY_PNL_UNAVAILABLE");
     }
@@ -1385,13 +1448,13 @@ export class TradingService {
       throw new Error("COOLING_DOWN");
     }
     const maxExposure =
-      risk.liveTradeCount < DEFAULT_RISK_POLICY.canaryTradeCount
-        ? DEFAULT_RISK_POLICY.canaryMaxOpenExposureMicros
-        : DEFAULT_RISK_POLICY.pilotMaxOpenExposureMicros;
+      risk.liveTradeCount < policy.canaryTradeCount
+        ? policy.canaryMaxOpenExposureMicros
+        : policy.pilotMaxOpenExposureMicros;
     if (!reconciliationOnly && risk.totalOpenExposureMicros > maxExposure) {
       throw new Error("TOTAL_EXPOSURE");
     }
-    if (!reconciliationOnly && risk.openMarketCount > DEFAULT_RISK_POLICY.maxOpenMarkets) {
+    if (!reconciliationOnly && risk.openMarketCount > policy.maxOpenMarkets) {
       throw new Error("TOO_MANY_MARKETS");
     }
     for (const execution of initialExecutions.filter(
@@ -1528,6 +1591,12 @@ export class TradingService {
       this.now(),
       false
     );
+    // Capture geoblock last. A slow sibling reconciliation request must not
+    // age an otherwise valid geoblock result past the five-second safety
+    // window before this cycle returns.
+    if (!reconciliationOnly) {
+      await this.assertFreshGeoblock();
+    }
     return monitored.length > 0 || openOrdersById.size > 0;
   }
 
@@ -1826,6 +1895,47 @@ export class TradingService {
         this.now()
       );
     }
+    if (
+      status === "CONFIRMED" &&
+      proposal.intent === "EXIT" &&
+      onchain !== null &&
+      onchain.finalized
+    ) {
+      this.recordConfirmedExitLoss(proposal, onchain, this.now());
+    }
+  }
+
+  private recordConfirmedExitLoss(
+    proposal: OrderProposal,
+    onchain: NonNullable<
+      Awaited<ReturnType<OnchainSettlementPort["verifySettlement"]>>
+    >,
+    nowMs: number
+  ): void {
+    const position = this.options.database.getPositionRecord(
+      proposal.market.tokenId
+    );
+    if (
+      position === null ||
+      position.conditionId.toLowerCase() !==
+        proposal.market.conditionId.toLowerCase()
+    ) {
+      return;
+    }
+    const costBasisMicros =
+      (onchain.filledSharesMicros * position.averagePriceMicros + 999_999n) /
+      1_000_000n;
+    const netProceedsMicros =
+      onchain.grossCostMicros > onchain.feeMicros
+        ? onchain.grossCostMicros - onchain.feeMicros
+        : 0n;
+    if (netProceedsMicros < costBasisMicros) {
+      const settledAtMs = Math.max(nowMs, ...onchain.blockTimestampsMs);
+      this.options.database.recordAgentMarketLoss(
+        proposal.market.conditionId,
+        settledAtMs
+      );
+    }
   }
 
   private saveVerifiedEntryPosition(
@@ -1924,16 +2034,14 @@ export class TradingService {
       profileExists,
       signerAddress,
       funderAddress,
-      signatureType,
-      geo
+      signatureType
     ] = await Promise.all([
       this.options.paperGate.result(this.options.paperGateSkip ?? false),
       this.options.liveTrading?.configured() ?? Promise.resolve(false),
       this.options.marketData.profileExists(this.options.profileAddress),
       this.options.accountBinding.signerAddress(),
       this.options.accountBinding.funderAddress(),
-      this.options.accountBinding.signatureType(),
-      this.options.marketData.checkGeoblock()
+      this.options.accountBinding.signatureType()
     ]);
     if (intent === "ENTRY" && !paperGate.passed) {
       throw new Error("PAPER_GATE_NOT_PASSED");
@@ -1951,6 +2059,11 @@ export class TradingService {
     ) {
       throw new Error("ACCOUNT_BINDING_REVALIDATION_FAILED");
     }
+    await this.assertFreshGeoblock();
+  }
+
+  private async assertFreshGeoblock(): Promise<void> {
+    const geo = await this.options.marketData.checkGeoblock();
     if (geo.blocked || this.now() - geo.checkedAtMs > 5_000) {
       throw new Error("GEOBLOCK_BLOCKED_OR_STALE");
     }
@@ -1977,7 +2090,14 @@ export class TradingService {
         throw new Error("RESEARCH_BUNDLE_INVALID");
       }
     }
-    const refreshed = await this.options.marketData.getMarketSnapshot({
+    const snapshotProvider = proposal.decisionOwner === "agent"
+      ? this.options.getAgentMarketSnapshot
+      : undefined;
+    if (proposal.decisionOwner === "agent" && snapshotProvider === undefined) {
+      throw new Error("MARKET_CHANNEL_UNAVAILABLE");
+    }
+    const refreshed = await (snapshotProvider ??
+      this.options.marketData.getMarketSnapshot.bind(this.options.marketData))({
       conditionId: proposal.market.conditionId,
       tokenId: proposal.market.tokenId,
       outcome: proposal.market.outcome,
@@ -1985,6 +2105,9 @@ export class TradingService {
       limitPriceMicros: proposal.limitPriceMicros
     });
     assertSameMarketContract(proposal.market, refreshed);
+    if (proposal.decisionOwner === "agent") {
+      assertAgentMarketSnapshotUnchanged(proposal.market, refreshed);
+    }
     const context = await this.options.riskContexts.forOrder(
       refreshed,
       proposal.side,
@@ -2011,7 +2134,10 @@ export class TradingService {
           ? {}
           : { exitReason: proposal.exitReason })
       },
-      context
+      context,
+      proposal.decisionOwner === "agent"
+        ? this.options.database.getAgentPolicy().risk
+        : DEFAULT_RISK_POLICY
     );
     if (proposal.intent === "ENTRY") {
       enforceInitialCanaryEntry(
@@ -2096,7 +2222,7 @@ function isResearchBundleUsable(
   ) {
     return false;
   }
-  if (bundle.evidenceKind === "MARKET_DATA") {
+  if (bundle.evidenceKind === "MARKET_DATA" || bundle.evidenceKind === "HYBRID") {
     if (
       bundle.marketSources === undefined ||
       bundle.marketSources.length < 2 ||
@@ -2114,15 +2240,17 @@ function isResearchBundleUsable(
         bundle.marketSources.some(
           (source) => source.snapshotHash !== hashMarketSnapshot(snapshot)
         )) ||
-      bundle.sources.length !== 0 ||
+      (bundle.evidenceKind === "MARKET_DATA" && bundle.sources.length !== 0) ||
       bundle.modelVersion === undefined ||
       bundle.analysisHash === undefined ||
       !/^[a-f0-9]{64}$/u.test(bundle.analysisHash)
     ) {
       return false;
     }
-    const { contentHash: _marketContentHash, ...marketContent } = bundle;
-    return hashCanonical(marketContent) === bundle.contentHash;
+    if (bundle.evidenceKind === "MARKET_DATA") {
+      const { contentHash: _marketContentHash, ...marketContent } = bundle;
+      return hashCanonical(marketContent) === bundle.contentHash;
+    }
   }
   const maxAgeMs =
     bundle.eventVolatilityClass === "FAST"
@@ -2224,7 +2352,11 @@ function enforceInitialCanaryEntry(
       message: "The first five live trades are capped at 1 pUSD including fee reserve."
     });
   }
-  if (context.totalOpenExposureMicros > 0n && context.marketExposureMicros === 0n) {
+  if (
+    (context.agentManagedOpenExposureMicros ??
+      context.totalOpenExposureMicros) > 0n &&
+    context.marketExposureMicros === 0n
+  ) {
     violations.push({
       code: "TOO_MANY_MARKETS",
       message: "The first five live trades allow only one simultaneous position."
@@ -2253,6 +2385,15 @@ function autonomousCounterThesis(
 ): string {
   const spread = features === null ? "unknown" : formatMicros(features.spreadMicros);
   return `The trade remains exposed to probability error, spread ${spread} pUSD, stale evidence and adverse movement; the exit supervisor enforces hard exits. ${counterRationale}`;
+}
+
+export function assertAgentMarketSnapshotUnchanged(
+  original: MarketSnapshot,
+  refreshed: MarketSnapshot
+): void {
+  if (hashMarketSnapshot(original) !== hashMarketSnapshot(refreshed)) {
+    throw new Error("AGENT_MARKET_SNAPSHOT_CHANGED");
+  }
 }
 
 function assertSameMarketContract(

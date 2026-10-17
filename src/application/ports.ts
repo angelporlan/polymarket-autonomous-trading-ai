@@ -74,6 +74,7 @@ export interface RiskContextPort {
     totalOpenExposureMicros: bigint;
     openMarketCount: number;
     liveTradeCount: number;
+    drawdownMicros?: bigint;
     emergencyStopped: boolean;
     coolingDownUntilMs: number | null;
   }>;

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   PUSD_SCALE,
   type CandidateMarket,
@@ -14,6 +15,7 @@ import {
   isRetryableStatus,
   toSafeExternalError
 } from "./safe-error.js";
+import type { MarketChannelBook } from "./market-channel-monitor.js";
 
 const DEFAULT_GAMMA_HOST = "https://gamma-api.polymarket.com";
 const DEFAULT_DATA_HOST = "https://data-api.polymarket.com";
@@ -62,6 +64,8 @@ export interface MarketSnapshotRequest {
   limitPriceMicros?: bigint;
   category?: MarketCategory;
   outcome?: string;
+  /** Validated public market-channel book used for agent-supervised live data. */
+  realtimeBook?: MarketChannelBook;
 }
 
 export interface ResolvedMarketReference {
@@ -801,12 +805,21 @@ export class PolymarketPublicClient {
         }
       );
     }
-    const capturedAtMs = validateBookSnapshot(
+    const restBookTimestampMs = validateBookSnapshot(
       book,
       request.conditionId,
       request.tokenId,
-      this.now()
+      this.now(),
+      request.realtimeBook === undefined
     );
+    if (request.realtimeBook !== undefined) {
+      validateRealtimeBook(
+        request.realtimeBook,
+        request.conditionId,
+        request.tokenId,
+        this.now()
+      );
+    }
     const gammaNegRisk = readRequiredBoolean(
       market,
       "gamma",
@@ -934,8 +947,22 @@ export class PolymarketPublicClient {
         "The CLOB order book tick size is invalid."
       );
     }
-    const bids = readRequiredPriceLevels(book.bids, tickSizeMicros);
-    const asks = readRequiredPriceLevels(book.asks, tickSizeMicros);
+    if (
+      request.realtimeBook?.tickSizeMicros !== null &&
+      request.realtimeBook?.tickSizeMicros !== undefined &&
+      request.realtimeBook.tickSizeMicros !== tickSizeMicros
+    ) {
+      throw invalidBookResponse(
+        "CLOB_BOOK_TICK_MISMATCH",
+        "The market channel and REST metadata disagree about tick size."
+      );
+    }
+    const bids = request.realtimeBook === undefined
+      ? readRequiredPriceLevels(book.bids, tickSizeMicros)
+      : validateRealtimeLevels(request.realtimeBook.bids, tickSizeMicros);
+    const asks = request.realtimeBook === undefined
+      ? readRequiredPriceLevels(book.asks, tickSizeMicros)
+      : validateRealtimeLevels(request.realtimeBook.asks, tickSizeMicros);
     bids.sort((left, right) => compareBigInt(right.priceMicros, left.priceMicros));
     asks.sort((left, right) => compareBigInt(left.priceMicros, right.priceMicros));
 
@@ -946,6 +973,24 @@ export class PolymarketPublicClient {
         "CLOB_BOOK_CROSSED",
         "The CLOB order book is crossed."
       );
+    }
+    if (
+      request.realtimeBook !== undefined &&
+      this.now() - restBookTimestampMs <= MAX_BOOK_AGE_MS
+    ) {
+      const restBids = readRequiredPriceLevels(book.bids, tickSizeMicros)
+        .sort((left, right) => compareBigInt(right.priceMicros, left.priceMicros));
+      const restAsks = readRequiredPriceLevels(book.asks, tickSizeMicros)
+        .sort((left, right) => compareBigInt(left.priceMicros, right.priceMicros));
+      if (
+        restBids[0]?.priceMicros !== bestBidMicros ||
+        restAsks[0]?.priceMicros !== bestAskMicros
+      ) {
+        throw invalidBookResponse(
+          "CLOB_BOOK_CROSSCHECK_MISMATCH",
+          "Fresh REST and market-channel books disagree."
+        );
+      }
     }
     let remoteCategory = classifyMarket(market);
     if (remoteCategory === undefined) {
@@ -1079,7 +1124,20 @@ export class PolymarketPublicClient {
             ),
       bids,
       asks,
-      capturedAtMs
+      capturedAtMs:
+        request.realtimeBook?.receivedAtMs ?? restBookTimestampMs,
+      sourceTimestampMs:
+        request.realtimeBook?.sourceTimestampMs ?? restBookTimestampMs,
+      receivedAtMs:
+        request.realtimeBook?.receivedAtMs ?? this.now(),
+      channelGeneration:
+        request.realtimeBook?.channelGeneration ?? 0,
+      bookHash:
+        request.realtimeBook?.bookHash ??
+        readOptionalBookHash(book) ??
+        hashBookLevels(request.conditionId, request.tokenId, bids, asks),
+      marketDataSource:
+        request.realtimeBook === undefined ? "REST" : "WEBSOCKET"
     };
   }
 
@@ -1300,7 +1358,8 @@ function validateBookSnapshot(
   book: JsonRecord,
   expectedConditionId: string,
   expectedTokenId: string,
-  nowMs: number
+  nowMs: number,
+  enforceFresh = true
 ): number {
   const market = readString(book, "market");
   const assetId = readString(book, "asset_id");
@@ -1318,10 +1377,14 @@ function validateBookSnapshot(
 
   const rawTimestamp = book.timestamp ?? book.t;
   const capturedAtMs = parseRemoteBookTimestampMs(rawTimestamp);
-  return validateBookEnvelope(capturedAtMs, nowMs);
+  return validateBookEnvelope(capturedAtMs, nowMs, enforceFresh);
 }
 
-function validateBookEnvelope(capturedAtMs: number | null, nowMs: number): number {
+function validateBookEnvelope(
+  capturedAtMs: number | null,
+  nowMs: number,
+  enforceFresh = true
+): number {
   if (
     capturedAtMs === null ||
     !Number.isSafeInteger(nowMs) ||
@@ -1333,13 +1396,100 @@ function validateBookEnvelope(capturedAtMs: number | null, nowMs: number): numbe
       "The CLOB order book timestamp is invalid."
     );
   }
-  if (nowMs - capturedAtMs > MAX_BOOK_AGE_MS) {
+  if (enforceFresh && nowMs - capturedAtMs > MAX_BOOK_AGE_MS) {
     throw invalidBookResponse(
       "CLOB_BOOK_STALE",
       "The CLOB order book snapshot is stale."
     );
   }
   return capturedAtMs;
+}
+
+function validateRealtimeBook(
+  book: MarketChannelBook,
+  expectedConditionId: string,
+  expectedTokenId: string,
+  nowMs: number
+): void {
+  if (
+    !Number.isSafeInteger(nowMs) ||
+    nowMs <= 0 ||
+    book.conditionId.toLowerCase() !== expectedConditionId.toLowerCase() ||
+    book.tokenId !== expectedTokenId ||
+    !Number.isSafeInteger(book.sourceTimestampMs) ||
+    !Number.isSafeInteger(book.receivedAtMs) ||
+    !Number.isSafeInteger(book.channelGeneration) ||
+    book.channelGeneration <= 0 ||
+    book.sourceTimestampMs <= 0 ||
+    book.sourceTimestampMs > nowMs + MAX_BOOK_AGE_MS ||
+    book.receivedAtMs <= 0 ||
+    book.receivedAtMs > nowMs ||
+    book.bookHash.length === 0 ||
+    book.bookHash.length > 256
+  ) {
+    throw invalidBookResponse(
+      "CLOB_MARKET_CHANNEL_BOOK_INVALID",
+      "The market-channel book failed identity or freshness validation."
+    );
+  }
+  if (nowMs - book.receivedAtMs > MAX_BOOK_AGE_MS) {
+    throw invalidBookResponse(
+      "CLOB_MARKET_CHANNEL_BOOK_STALE",
+      "The market-channel book expired while its market metadata was being verified."
+    );
+  }
+}
+
+function validateRealtimeLevels(
+  levels: PriceLevel[],
+  tickSizeMicros: bigint
+): PriceLevel[] {
+  if (!Array.isArray(levels) || levels.length === 0 || levels.length > 10_000) {
+    throw invalidBookResponse(
+      "CLOB_MARKET_CHANNEL_BOOK_INVALID",
+      "The market-channel book has no executable levels."
+    );
+  }
+  const seen = new Set<string>();
+  return levels.map((level) => {
+    if (
+      level.priceMicros <= 0n ||
+      level.priceMicros > PUSD_SCALE ||
+      level.priceMicros % tickSizeMicros !== 0n ||
+      level.sharesMicros <= 0n ||
+      seen.has(level.priceMicros.toString())
+    ) {
+      throw invalidBookResponse(
+        "CLOB_MARKET_CHANNEL_BOOK_INVALID",
+        "The market-channel book contains an invalid level."
+      );
+    }
+    seen.add(level.priceMicros.toString());
+    return { ...level };
+  });
+}
+
+function readOptionalBookHash(book: JsonRecord): string | null {
+  const value = book.hash;
+  return typeof value === "string" && value.length > 0 && value.length <= 256
+    ? value.toLowerCase()
+    : null;
+}
+
+function hashBookLevels(
+  conditionId: string,
+  tokenId: string,
+  bids: PriceLevel[],
+  asks: PriceLevel[]
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      conditionId: conditionId.toLowerCase(),
+      tokenId,
+      bids: bids.map((level) => [level.priceMicros.toString(), level.sharesMicros.toString()]),
+      asks: asks.map((level) => [level.priceMicros.toString(), level.sharesMicros.toString()])
+    }))
+    .digest("hex");
 }
 
 function parseRemoteBookTimestampMs(value: unknown): number | null {
@@ -1854,6 +2004,10 @@ function invalidBookResponse(
     | "CLOB_BOOK_TIMESTAMP_INVALID"
     | "CLOB_BOOK_STALE"
     | "CLOB_BOOK_TICK_INVALID"
+    | "CLOB_BOOK_TICK_MISMATCH"
+    | "CLOB_BOOK_CROSSCHECK_MISMATCH"
+    | "CLOB_MARKET_CHANNEL_BOOK_INVALID"
+    | "CLOB_MARKET_CHANNEL_BOOK_STALE"
     | "CLOB_MIN_ORDER_SIZE_MISMATCH"
     | "CLOB_BOOK_ONE_SIDED"
     | "CLOB_BOOK_CROSSED"

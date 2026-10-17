@@ -1,15 +1,34 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createOrderProposal } from "../src/domain/proposals.js";
 import { createTradingSession } from "../src/domain/session.js";
 import type { OrderProposal } from "../src/domain/types.js";
-import { TradingDatabase } from "../src/storage/database.js";
+import {
+  TradingDatabase,
+  verifyAuditChainReadOnly
+} from "../src/storage/database.js";
 import { stringifyWithBigInts } from "../src/storage/codec.js";
 import { intentFixture, riskContextFixture } from "./fixtures.js";
 
 describe("TradingDatabase", () => {
+  it("verifies the audit chain through a read-only database handle", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "polymarket-doctor-"));
+    const filename = path.join(directory, "trading.sqlite");
+    try {
+      const database = new TradingDatabase(filename);
+      database.setEmergencyStop(true, "CONTROLLED_TEST");
+      database.close();
+      const before = statSync(filename).mtimeMs;
+
+      expect(verifyAuditChainReadOnly(filename)).toBe(true);
+      expect(statSync(filename).mtimeMs).toBe(before);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("persists a proposal and enforces one-shot execution", () => {
     const database = new TradingDatabase(":memory:");
     const now = Date.now();

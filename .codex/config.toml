@@ -1,6 +1,6 @@
 [mcp_servers.polymarket]
 enabled = true
-required = false
+required = true
 command = "node"
 args = ["dist/mcp/server.js"]
 cwd = "/Users/angel/devp/polymarket"
@@ -16,7 +16,7 @@ POLYMARKET_DB_PATH = "./data/polymarket.sqlite"
 POLYMARKET_APPROVAL_HOST = "127.0.0.1"
 POLYMARKET_APPROVAL_PORT = "8787"
 POLYMARKET_LIVE_ENABLED = "true"
-PAPER_GATE_SKIP = "true"
+PAPER_GATE_SKIP = "false"
 POLYGON_RPC_URLS = "https://polygon-rpc.com,https://polygon-bor-rpc.publicnode.com"
 POLYMARKET_KEYCHAIN_SERVICE = "codex-polymarket-guarded"
 # Live also requires POLYGON_RPC_URLS with two credential-free HTTPS origins.

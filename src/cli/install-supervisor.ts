@@ -7,6 +7,8 @@ import { loadConfig } from "../config.js";
 
 const LABEL = "com.codex.polymarket.supervisor";
 
+type LaunchctlRunner = (args: string[]) => void;
+
 export function installSupervisor(): void {
   if (process.platform !== "darwin") {
     throw new Error("SUPERVISOR_INSTALL_REQUIRES_MACOS");
@@ -43,10 +45,37 @@ export function installSupervisor(): void {
   if (uid === undefined) {
     throw new Error("SUPERVISOR_USER_ID_UNAVAILABLE");
   }
-  execFileSync("launchctl", ["bootstrap", `gui/${uid}`, plistPath], {
-    stdio: "ignore"
-  });
-  process.stderr.write(`Installed ${LABEL}.\n`);
+  const result = bootstrapOrRestartSupervisor(
+    uid,
+    plistPath,
+    (args) => {
+      execFileSync("launchctl", args, { stdio: "ignore" });
+    }
+  );
+  process.stderr.write(
+    `${result === "installed" ? "Installed" : "Restarted"} ${LABEL}.\n`
+  );
+}
+
+export function bootstrapOrRestartSupervisor(
+  uid: number,
+  plistPath: string,
+  runLaunchctl: LaunchctlRunner
+): "installed" | "restarted" {
+  const domain = `gui/${uid}`;
+  const service = `${domain}/${LABEL}`;
+  try {
+    runLaunchctl(["bootstrap", domain, plistPath]);
+    return "installed";
+  } catch (bootstrapError) {
+    try {
+      runLaunchctl(["print", service]);
+    } catch {
+      throw bootstrapError;
+    }
+    runLaunchctl(["kickstart", "-k", service]);
+    return "restarted";
+  }
 }
 
 export function renderLaunchdPlist(input: {

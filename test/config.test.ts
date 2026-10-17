@@ -41,6 +41,12 @@ describe("runtime configuration", () => {
     expect(
       loadConfig({
         POLYMARKET_PROFILE_ADDRESS: PROFILE,
+        PAPER_GATE_SKIP: "true"
+      }).paperGateSkipSource
+    ).toBe("environment");
+    expect(
+      loadConfig({
+        POLYMARKET_PROFILE_ADDRESS: PROFILE,
         PAPER_GATE_SKIP: "false"
       }).paperGateSkip
     ).toBe(false);

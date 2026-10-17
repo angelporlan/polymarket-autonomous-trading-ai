@@ -11,6 +11,11 @@ export interface DashboardHttpServerOptions {
   host: "127.0.0.1";
   port: number;
   database: TradingDatabase;
+  paperGateSkip?: boolean;
+  paperGateSkipSource?: "dotenv" | "environment" | "default";
+  serverVersion?: string;
+  buildId?: string;
+  marketChannelStatus?: () => Record<string, unknown>;
   now?: () => number;
 }
 
@@ -120,6 +125,8 @@ export class DashboardHttpServer {
     const cooldown = this.options.database.getCooldown();
     const supervisor = this.options.database.getSupervisorHeartbeat();
     const agentRun = this.options.database.getAgentRun(nowMs);
+    const agentPolicy = this.options.database.getAgentPolicy();
+    const portfolioAdoption = this.options.database.getLivePortfolioAdoption();
     const openPositions = positions.filter(
       (position) => position.exitState !== "CLOSED" && position.sharesMicros > 0n
     );
@@ -129,6 +136,43 @@ export class DashboardHttpServer {
 
     return {
       status: emergency.active ? "EMERGENCY_STOPPED" : activation.active ? "LIVE_ACTIVE" : "READ_ONLY",
+      paperGateOverride: {
+        active: this.options.paperGateSkip === true,
+        source: this.options.paperGateSkipSource ?? "default",
+        reason: this.options.paperGateSkip === true ? "PAPER_GATE_SKIPPED" : null
+      },
+      runtime: {
+        serverVersion: this.options.serverVersion ?? "unknown",
+        buildId: this.options.buildId ?? "unknown",
+        marketChannel: this.options.marketChannelStatus?.() ?? {
+          state: "idle",
+          generation: 0,
+          subscribedTokenCount: 0,
+          freshBookCount: 0
+        }
+      },
+      portfolioAdoption: portfolioAdoption
+        ? {
+            status: "RECORDED",
+            dayKey: portfolioAdoption.dayKey,
+            adoptedAt: new Date(portfolioAdoption.adoptedAtMs).toISOString(),
+            positionCount: portfolioAdoption.positionKeys.length
+          }
+        : { status: "NOT_RECORDED" },
+      agentPolicy: {
+        version: agentPolicy.version,
+        maxOpenMarkets: agentPolicy.risk.maxOpenMarkets,
+        decisionIntervalSeconds: agentPolicy.decisionIntervalMs / 1_000,
+        canaryMaxOrderPusd: formatMicros(
+          agentPolicy.risk.canaryMaxOrderMicros
+        ),
+        pilotMaxOrderPusd: formatMicros(
+          agentPolicy.risk.pilotMaxOrderMicros
+        ),
+        maxMarketOrCorrelationPusd: formatMicros(
+          agentPolicy.risk.maxMarketOrCorrelationMicros
+        )
+      },
       emergencyStop: emergency,
       liveActivation: activation,
       agentRun: agentRun
@@ -250,7 +294,8 @@ export class DashboardHttpServer {
               lastCycleAt: toIsoOrNull(supervisor.lastCycleAtMs),
               lastSuccessAt: toIsoOrNull(supervisor.lastSuccessAtMs),
               nextCycleAt: toIsoOrNull(supervisor.nextCycleAtMs),
-              lastErrorCode: supervisor.lastErrorCode
+              lastErrorCode: supervisor.lastErrorCode,
+              mode: supervisor.mode ?? "IDLE"
             }
           : null
       },
@@ -295,6 +340,7 @@ export class DashboardHttpServer {
       <h1>Polymarket Autonomous Trading AI</h1>
       <h2>Read-Only Monitoring Dashboard (127.0.0.1)</h2>
       <p>System Status: <span class="badge ${data.status === "LIVE_ACTIVE" ? "badge-green" : data.status === "EMERGENCY_STOPPED" ? "badge-red" : "badge-blue"}">${escapeHtml(String(data.status))}</span></p>
+      <p>Paper gate: <strong>${data.paperGateOverride && typeof data.paperGateOverride === "object" && "active" in data.paperGateOverride && data.paperGateOverride.active === true ? "BYPASS ACTIVE — PAPER_GATE_SKIPPED" : "REQUIRED"}</strong></p>
     </div>
     <div class="card">
       <h2>Active Telemetry & Sessions</h2>

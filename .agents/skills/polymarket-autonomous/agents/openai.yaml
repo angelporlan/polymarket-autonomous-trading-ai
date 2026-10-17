@@ -1,0 +1,4 @@
+interface:
+  display_name: "Polymarket Autónomo"
+  short_description: "Trading live con lease y límites"
+  default_prompt: "Usa $polymarket-autonomous, verifica el MCP y ejecuta ciclos WebSocket ligados al lease con límites estrictos."

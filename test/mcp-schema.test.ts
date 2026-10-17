@@ -7,6 +7,7 @@ import {
 } from "../src/mcp/server.js";
 import {
   prepareMarketEvidenceInputSchema,
+  prepareAgentEvidenceInputSchema,
   stageOrderInputSchema
 } from "../src/mcp/schemas.js";
 
@@ -141,6 +142,10 @@ describe("Polymarket MCP contract", () => {
         "import_legacy_position",
         "prepare_research_bundle",
         "prepare_market_evidence",
+        "prepare_agent_cycle",
+        "prepare_agent_evidence",
+        "get_agent_policy",
+        "adjust_agent_policy",
         "start_agent_run",
         "heartbeat_agent_run",
         "get_agent_run",
@@ -179,6 +184,52 @@ describe("Polymarket MCP contract", () => {
         agentRunId: undefined
       }).success
     ).toBe(false);
+  });
+
+  it("requires hybrid evidence to carry two independent HTTPS sources", () => {
+    const valid = prepareAgentEvidenceInputSchema.safeParse({
+      agentRunId: "agent_test",
+      conditionId: "condition-1",
+      tokenId: "token-1",
+      estimatedProbability: "0.55",
+      eventVolatilityClass: "SLOW",
+      sourceUrls: ["https://one.example/news", "https://two.example/report"],
+      sourceEvidence: [
+        {
+          requestedUrl: "https://one.example/news",
+          supportedClaims: ["The first source supports the thesis."],
+          contradictedClaims: [],
+          quotedFacts: ["A quoted fact from source one."],
+          probabilityImpact: "0.05"
+        },
+        {
+          requestedUrl: "https://two.example/report",
+          supportedClaims: ["The second source supports the thesis."],
+          contradictedClaims: [],
+          quotedFacts: ["A quoted fact from source two."],
+          probabilityImpact: "0.02"
+        }
+      ],
+      modelVersion: "agent-edge-v1",
+      rationale: "The market and independently verified sources support this thesis.",
+      counterRationale: "The evidence can be stale or resolution rules can invalidate it."
+    });
+    expect(valid.success).toBe(true);
+    expect(valid.success && valid.data.executionMode).toBe("paper");
+    expect(
+      prepareAgentEvidenceInputSchema.safeParse({
+        ...(valid.success ? valid.data : {}),
+        executionMode: "live"
+      }).success
+    ).toBe(false);
+    expect(
+      prepareAgentEvidenceInputSchema.safeParse({
+        ...(valid.success ? valid.data : {}),
+        executionMode: "live",
+        cycleId: "cycle-one",
+        candidateSnapshotId: "snapshot-one"
+      }).success
+    ).toBe(true);
   });
 
   it("execute_staged_order executes proposal autonomously subject to session budget and risk checks", async () => {

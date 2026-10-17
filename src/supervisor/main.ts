@@ -34,6 +34,7 @@ export async function runSupervisor(): Promise<void> {
     let consecutiveFailures = 0;
     let lastSuccessAtMs: number | null = null;
     let reconciliationActive = false;
+    let lastReportedErrorCode: string | null = null;
 
     persistHeartbeat(runtime, {
       pid: process.pid,
@@ -44,7 +45,8 @@ export async function runSupervisor(): Promise<void> {
       nextCycleAtMs: null,
       consecutiveFailures: 0,
       reconciliationActive: false,
-      lastErrorCode: null
+      lastErrorCode: null,
+      mode: "IDLE"
     });
 
     while (!stopRequested) {
@@ -52,6 +54,7 @@ export async function runSupervisor(): Promise<void> {
       try {
         const result = await runtime.runSupervisorCycle();
         consecutiveFailures = 0;
+        lastReportedErrorCode = null;
         lastSuccessAtMs = Date.now();
         reconciliationActive = result.reconciliationActive;
         const delayMs = nextSupervisorDelayMs(
@@ -66,7 +69,8 @@ export async function runSupervisor(): Promise<void> {
           nextCycleAtMs: Date.now() + delayMs,
           consecutiveFailures,
           reconciliationActive,
-          lastErrorCode: null
+          lastErrorCode: null,
+          mode: runtime.getSupervisorMode(false)
         });
         await waitForNextCycle(
           delayMs,
@@ -75,7 +79,7 @@ export async function runSupervisor(): Promise<void> {
             wakeWaiter = wake;
           }
         );
-      } catch {
+      } catch (error) {
         consecutiveFailures += 1;
         reconciliationActive = false;
         try {
@@ -94,9 +98,14 @@ export async function runSupervisor(): Promise<void> {
           nextCycleAtMs: Date.now() + delayMs,
           consecutiveFailures,
           reconciliationActive,
-          lastErrorCode: SUPERVISOR_ERROR_CODE
+          lastErrorCode: sanitizeSupervisorErrorCode(error),
+          mode: "DEGRADED"
         });
-        process.stderr.write(`${SUPERVISOR_ERROR_CODE}\n`);
+        const errorCode = sanitizeSupervisorErrorCode(error);
+        if (errorCode !== lastReportedErrorCode) {
+          process.stderr.write(`${errorCode}\n`);
+          lastReportedErrorCode = errorCode;
+        }
         await waitForNextCycle(
           delayMs,
           () => stopRequested,
@@ -116,7 +125,8 @@ export async function runSupervisor(): Promise<void> {
       nextCycleAtMs: null,
       consecutiveFailures,
       reconciliationActive,
-      lastErrorCode: null
+      lastErrorCode: null,
+      mode: "IDLE"
     });
   } catch {
     process.stderr.write(`${SUPERVISOR_ERROR_CODE}\n`);
@@ -138,6 +148,26 @@ function persistHeartbeat(
   heartbeat: SupervisorHeartbeat
 ): void {
   runtime.saveSupervisorHeartbeat(heartbeat);
+}
+
+export function sanitizeSupervisorErrorCode(error: unknown): string {
+  const explicitCode =
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+      ? error.code
+      : "";
+  if (/^[A-Z][A-Z0-9_]{2,80}$/u.test(explicitCode)) {
+    return explicitCode;
+  }
+  const messageCode =
+    error instanceof Error
+      ? (error.message.split(/[:\s]/u, 1)[0] ?? "")
+      : "";
+  return /^[A-Z][A-Z0-9_]{2,80}$/u.test(messageCode)
+    ? messageCode
+    : SUPERVISOR_ERROR_CODE;
 }
 
 function waitForNextCycle(

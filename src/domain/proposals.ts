@@ -92,7 +92,12 @@ export function hashCanonical(value: unknown): string {
 
 /** Hash market facts used by an analysis while ignoring capture-time noise. */
 export function hashMarketSnapshot(snapshot: MarketSnapshot): string {
-  const { capturedAtMs: _capturedAtMs, ...stableSnapshot } = snapshot;
+  const {
+    capturedAtMs: _capturedAtMs,
+    receivedAtMs: _receivedAtMs,
+    sourceTimestampMs: _sourceTimestampMs,
+    ...stableSnapshot
+  } = snapshot;
   return hashCanonical(stableSnapshot);
 }
 

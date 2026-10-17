@@ -90,6 +90,7 @@ export interface OnboardingStatus {
   binding: ReturnType<TradingDatabase["getAccountBinding"]>;
   liveEnvironmentEnabled: boolean;
   paperGateSkip: boolean;
+  paperGateSkipSource: "dotenv" | "environment" | "default";
   localLiveActivation: boolean;
   emergencyStopped: boolean;
   auditChainValid: boolean;
@@ -122,6 +123,7 @@ export class OnboardingService {
       binding: this.database.getAccountBinding(),
       liveEnvironmentEnabled: this.config.liveEnabled,
       paperGateSkip: this.config.paperGateSkip,
+      paperGateSkipSource: this.config.paperGateSkipSource,
       localLiveActivation: this.database.getLiveActivation().active,
       emergencyStopped: this.database.getEmergencyStop().active,
       auditChainValid: this.database.verifyAuditChain()
@@ -198,6 +200,15 @@ export class OnboardingService {
     if (!paperGatePassed) {
       throw new Error("The paper gate has not passed.");
     }
+    if (this.config.paperGateSkip) {
+      if (this.config.paperGateSkipSource !== "dotenv") {
+        throw new Error("PAPER_GATE_SKIP_MUST_BE_CONFIGURED_IN_DOTENV");
+      }
+      this.database.appendAudit("PAPER_GATE_OVERRIDE_ACTIVE", null, {
+        source: this.config.paperGateSkipSource,
+        activatedAtMs: Date.now()
+      });
+    }
     if (!this.database.verifyAuditChain()) {
       throw new Error("The audit chain is invalid.");
     }
@@ -248,7 +259,7 @@ export class OnboardingService {
     if (!existingDailyRisk.known) {
       if (hasOpenPositions && !adoptedExistingPortfolio) {
         throw new Error(
-          "A new daily risk session requires zero open positions."
+          "PORTFOLIO_ADOPTION_REQUIRED: preserve the existing positions with `npm run onboard -- adopt-existing-portfolio --confirm ADOPT_EXISTING_PORTFOLIO`, then activate live again."
         );
       }
       const activity = await publicClient.getUserActivity(
@@ -304,6 +315,12 @@ export class OnboardingService {
     if (!paperGatePassed) {
       throw new Error("The paper gate has not passed.");
     }
+    if (
+      this.config.paperGateSkip &&
+      this.config.paperGateSkipSource !== "dotenv"
+    ) {
+      throw new Error("PAPER_GATE_SKIP_MUST_BE_CONFIGURED_IN_DOTENV");
+    }
     if (!this.database.verifyAuditChain()) {
       throw new Error("The audit chain is invalid.");
     }
@@ -358,11 +375,21 @@ export class OnboardingService {
     const creds = await this.readStoredL2Credentials(
       "Confirm adoption of the existing Polymarket portfolio"
     );
-    const closedOnly = await runBoundedAuthenticatedRequest(
-      this.createReadOnlyClient(creds, binding).getClosedOnlyMode(),
+    const client = this.createReadOnlyClient(creds, binding);
+    const [closedOnly, openOrders] = await runBoundedAuthenticatedRequest(
+      Promise.all([
+        client.getClosedOnlyMode(),
+        client.getOpenOrders(undefined, false)
+      ]),
       "Authenticated portfolio adoption state check failed."
     );
     assertAccountCanOpenOrders(closedOnly);
+    if (!Array.isArray(openOrders)) {
+      throw new Error("Authenticated open-order reconciliation was malformed.");
+    }
+    if (openOrders.length > 0) {
+      throw new Error("Portfolio adoption requires zero remote open orders.");
+    }
 
     this.database.setLivePortfolioAdoption({
       profileAddress: this.config.profileAddress,
@@ -1065,7 +1092,7 @@ function positionIdentity(
   return `${position.conditionId.toLowerCase()}:${position.tokenId}`;
 }
 
-function portfolioIdentityHash(portfolio: PortfolioSnapshot): string {
+export function portfolioIdentityHash(portfolio: PortfolioSnapshot): string {
   return hashCanonical({
     profileAddress: portfolio.profileAddress.toLowerCase(),
     positions: portfolio.positions
@@ -1098,7 +1125,7 @@ function portfolioExposureMicros(portfolio: PortfolioSnapshot): bigint {
   }, 0n);
 }
 
-function isPortfolioAdoptionCurrent(
+export function isPortfolioAdoptionCurrent(
   adoption: ReturnType<TradingDatabase["getLivePortfolioAdoption"]>,
   profileAddress: string,
   dayKey: string,

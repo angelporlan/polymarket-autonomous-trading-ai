@@ -50,6 +50,36 @@ export function validatePolicyAdjustments(policy: RiskPolicy): RiskPolicy {
       `Policy adjustment rejected: dailyStopMicros (${policy.dailyStopMicros}) exceeds hard daily stop (${RISK_HARD_DAILY_STOP_PUSD})`
     );
   }
+  if (policy.canaryMaxOrderMicros < 1n * PUSD_SCALE || policy.canaryMaxOrderMicros > 5n * PUSD_SCALE) {
+    throw new Error("Policy adjustment rejected: canary order must be between 1 and 5 pUSD.");
+  }
+  if (policy.pilotMaxOrderMicros < 1n * PUSD_SCALE || policy.pilotMaxOrderMicros > 10n * PUSD_SCALE) {
+    throw new Error("Policy adjustment rejected: pilot order must be between 1 and 10 pUSD.");
+  }
+  if (policy.canaryMaxOpenExposureMicros < 5n * PUSD_SCALE || policy.canaryMaxOpenExposureMicros > 20n * PUSD_SCALE) {
+    throw new Error("Policy adjustment rejected: canary exposure must be between 5 and 20 pUSD.");
+  }
+  if (policy.pilotMaxOpenExposureMicros < 10n * PUSD_SCALE || policy.pilotMaxOpenExposureMicros > 50n * PUSD_SCALE) {
+    throw new Error("Policy adjustment rejected: pilot exposure must be between 10 and 50 pUSD.");
+  }
+  if (policy.maxMarketOrCorrelationMicros < 5n * PUSD_SCALE || policy.maxMarketOrCorrelationMicros > 25n * PUSD_SCALE) {
+    throw new Error("Policy adjustment rejected: market exposure must be between 5 and 25 pUSD.");
+  }
+  if (policy.maxOpenMarkets < 1 || policy.maxOpenMarkets > 5) {
+    throw new Error("Policy adjustment rejected: open markets must be between 1 and 5.");
+  }
+  if (policy.minEdgeMicros < 50_000n || policy.minEdgeMicros > 150_000n) {
+    throw new Error("Policy adjustment rejected: minimum edge must be between 0.05 and 0.15.");
+  }
+  if (policy.maxSpreadMicros < 10_000n || policy.maxSpreadMicros > 30_000n) {
+    throw new Error("Policy adjustment rejected: maximum spread must be between 0.01 and 0.03.");
+  }
+  if (policy.depthMultiplier < 5n || policy.depthMultiplier > 10n) {
+    throw new Error("Policy adjustment rejected: depth multiplier must be between 5 and 10.");
+  }
+  if (policy.capitalMicros !== RISK_HARD_CEILING_TOTAL_EXPOSURE_PUSD) {
+    throw new Error("Policy adjustment rejected: capital hard ceiling is immutable.");
+  }
   return Object.freeze({ ...policy });
 }
 

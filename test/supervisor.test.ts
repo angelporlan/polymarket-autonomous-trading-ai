@@ -2,13 +2,17 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { renderLaunchdPlist } from "../src/cli/install-supervisor.js";
+import {
+  bootstrapOrRestartSupervisor,
+  renderLaunchdPlist
+} from "../src/cli/install-supervisor.js";
 import { TradingDatabase } from "../src/storage/database.js";
 import { SupervisorProcessLock } from "../src/supervisor/process-lock.js";
 import {
   nextSupervisorDelayMs,
   supervisorBackoffDelayMs
 } from "../src/supervisor/scheduler.js";
+import { sanitizeSupervisorErrorCode } from "../src/supervisor/main.js";
 import type { SupervisorHeartbeat } from "../src/supervisor/types.js";
 
 describe("persistent position supervisor", () => {
@@ -83,5 +87,67 @@ describe("persistent position supervisor", () => {
     expect(plist).not.toContain("EnvironmentVariables");
     expect(plist).not.toContain("PRIVATE_KEY");
     expect(plist).not.toContain("L2");
+  });
+
+  it("bootstraps a supervisor that is not loaded", () => {
+    const calls: string[][] = [];
+    const result = bootstrapOrRestartSupervisor(
+      501,
+      "/tmp/supervisor.plist",
+      (args) => calls.push(args)
+    );
+    expect(result).toBe("installed");
+    expect(calls).toEqual([
+      ["bootstrap", "gui/501", "/tmp/supervisor.plist"]
+    ]);
+  });
+
+  it("restarts an already loaded supervisor instead of failing", () => {
+    const calls: string[][] = [];
+    const result = bootstrapOrRestartSupervisor(
+      501,
+      "/tmp/supervisor.plist",
+      (args) => {
+        calls.push(args);
+        if (args[0] === "bootstrap") throw new Error("already loaded");
+      }
+    );
+    expect(result).toBe("restarted");
+    expect(calls).toEqual([
+      ["bootstrap", "gui/501", "/tmp/supervisor.plist"],
+      ["print", "gui/501/com.codex.polymarket.supervisor"],
+      ["kickstart", "-k", "gui/501/com.codex.polymarket.supervisor"]
+    ]);
+  });
+
+  it("preserves the bootstrap failure when no loaded service exists", () => {
+    const bootstrapError = new Error("bootstrap failed");
+    expect(() =>
+      bootstrapOrRestartSupervisor(
+        501,
+        "/tmp/supervisor.plist",
+        (args) => {
+          if (args[0] === "bootstrap") throw bootstrapError;
+          throw new Error("service missing");
+        }
+      )
+    ).toThrow(bootstrapError);
+  });
+
+  it("preserves validated safe error codes from typed supervisor failures", () => {
+    expect(
+      sanitizeSupervisorErrorCode(
+        Object.assign(new Error("A safe external request failed."), {
+          code: "CLOB_OPEN_ORDERS_ERROR"
+        })
+      )
+    ).toBe("CLOB_OPEN_ORDERS_ERROR");
+    expect(
+      sanitizeSupervisorErrorCode(
+        Object.assign(new Error("A request failed."), {
+          code: "unsafe detail with spaces"
+        })
+      )
+    ).toBe("SUPERVISOR_CYCLE_FAILED");
   });
 });

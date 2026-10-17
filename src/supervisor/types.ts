@@ -6,6 +6,13 @@ export type SupervisorHeartbeatStatus =
   | "DEGRADED"
   | "STOPPING";
 
+export type SupervisorMode =
+  | "IDLE"
+  | "ARMED"
+  | "AGENT_ACTIVE"
+  | "LOCKED_RECONCILING"
+  | "DEGRADED";
+
 export interface SupervisorHeartbeat {
   pid: number;
   startedAtMs: number;
@@ -16,6 +23,7 @@ export interface SupervisorHeartbeat {
   consecutiveFailures: number;
   reconciliationActive: boolean;
   lastErrorCode: string | null;
+  mode?: SupervisorMode;
 }
 
 export interface SupervisorCycleResult extends SupervisePositionsOutput {

@@ -26,6 +26,130 @@ const BLOCK_HASH = `0x${"e".repeat(64)}`;
 const TRADE_ID = "fixture-live-trade";
 
 describe("live reconciliation convergence", () => {
+  it("captures geoblock after potentially slow reconciliation reads", async () => {
+    const database = new TradingDatabase(":memory:");
+    let nowMs = NOW_MS;
+    let reconciliationReadsFinished = false;
+    database.setLiveActivation(true, NOW_MS - 1);
+
+    const service = new TradingService({
+      profileAddress: PROFILE,
+      liveEnvironmentEnabled: true,
+      database,
+      marketData: {
+        async profileExists() {
+          return true;
+        },
+        async getPortfolio() {
+          nowMs += 6_000;
+          reconciliationReadsFinished = true;
+          return {
+            profileAddress: PROFILE,
+            pUsdBalanceMicros: null,
+            totalPositionValueMicros: 0n,
+            totalPnlMicros: 0n,
+            positions: [],
+            capturedAtMs: nowMs,
+            source: "public" as const
+          };
+        },
+        async getUserActivity() {
+          return [];
+        },
+        async scanCandidates() {
+          return [];
+        },
+        async getMarketSnapshot() {
+          throw new Error("not used");
+        },
+        async checkGeoblock() {
+          expect(reconciliationReadsFinished).toBe(true);
+          return {
+            blocked: false,
+            country: "ES",
+            region: "MD",
+            checkedAtMs: nowMs
+          };
+        }
+      },
+      accountBinding: {
+        async signerConfigured() {
+          return true;
+        },
+        async signerAddress() {
+          return SIGNER;
+        },
+        async signatureType() {
+          return 1;
+        },
+        async funderAddress() {
+          return PROFILE;
+        }
+      },
+      riskContexts: {
+        async forOrder() {
+          return riskContextFixture(nowMs);
+        },
+        async summary() {
+          return {
+            dailyPnlMicros: 0n,
+            dailyPnlKnown: true,
+            totalOpenExposureMicros: 0n,
+            openMarketCount: 0,
+            liveTradeCount: 0,
+            emergencyStopped: false,
+            coolingDownUntilMs: null
+          };
+        }
+      },
+      paperGate: {
+        async metrics() {
+          throw new Error("not used");
+        },
+        async result() {
+          throw new Error("not used");
+        }
+      },
+      liveTrading: {
+        async configured() {
+          return true;
+        },
+        async submitGtd() {
+          throw new Error("not used");
+        },
+        async cancelOrder() {
+          return {};
+        },
+        async cancelAll() {
+          return {};
+        },
+        async getOrderStatus() {
+          return null;
+        },
+        async getOpenOrders() {
+          return [];
+        },
+        async getTrades() {
+          return [];
+        },
+        async startHeartbeat() {},
+        async stopHeartbeat() {}
+      },
+      onchainSettlement: {
+        async verifySettlement() {
+          throw new Error("not used");
+        }
+      },
+      now: () => nowMs
+    });
+
+    try {
+      await expect(service.monitorLiveSafety()).resolves.toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
   it("attributes a fresh Data API fill in the same cycle and confirms only after every source converges", async () => {
     const harness = liveHarness(true);
 
@@ -36,6 +160,10 @@ describe("live reconciliation convergence", () => {
     expect(harness.onchain.verifySettlement).toHaveBeenCalledOnce();
     expect(harness.database.countCanaryEligibleExecutions()).toBe(1);
     await expect(harness.service.monitorLiveSafety()).resolves.toBe(false);
+    harness.database.setEmergencyStop(true, "CONTROLLED_STABLE_LOCK");
+    await expect(harness.service.monitorLiveSafety()).resolves.toBe(false);
+    await expect(harness.service.monitorLiveSafety()).resolves.toBe(false);
+    expect(harness.database.countAuditEvents("EMERGENCY_STOP_SET")).toBe(1);
     harness.database.close();
   });
 

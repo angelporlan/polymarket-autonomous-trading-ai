@@ -99,6 +99,59 @@ function recordPaperProposal(
 }
 
 describe("DatabaseRiskContext", () => {
+  it("counts adopted inventory in total exposure but not in the agent canary slot", async () => {
+    const nowMs = Date.parse("2026-07-23T10:00:00.000Z");
+    const database = new TradingDatabase(":memory:");
+    const snapshot = marketFixture(nowMs);
+    const portfolio: PortfolioSnapshot = {
+      profileAddress: PROFILE_ADDRESS,
+      pUsdBalanceMicros: 20n * PUSD_SCALE,
+      totalPositionValueMicros: 1_000_000n,
+      totalPnlMicros: 0n,
+      positions: [
+        {
+          tokenId: snapshot.tokenId,
+          conditionId: snapshot.conditionId,
+          question: snapshot.question,
+          outcome: snapshot.outcome,
+          sizeMicros: 2_000_000n,
+          averagePriceMicros: 500_000n,
+          currentPriceMicros: 500_000n,
+          currentValueMicros: 1_000_000n,
+          cashPnlMicros: 0n,
+          realizedPnlMicros: 0n,
+          endTimeMs: snapshot.endTimeMs
+        }
+      ],
+      capturedAtMs: nowMs,
+      source: "authenticated"
+    };
+    database.setLivePortfolioAdoption({
+      profileAddress: PROFILE_ADDRESS,
+      dayKey: zonedDayKey(nowMs, "Europe/Madrid"),
+      adoptedAtMs: nowMs,
+      portfolioHash: "a".repeat(64),
+      positionKeys: [
+        `${snapshot.conditionId.toLowerCase()}:${snapshot.tokenId}`
+      ]
+    });
+    const contexts = new DatabaseRiskContext({
+      database,
+      marketData: marketDataFor(() => portfolio),
+      profileAddress: PROFILE_ADDRESS,
+      now: () => nowMs
+    });
+
+    try {
+      const summary = await contexts.summary();
+      expect(summary.totalOpenExposureMicros).toBe(1_000_000n);
+      expect(summary.agentManagedOpenExposureMicros).toBe(0n);
+      expect(summary.openMarketCount).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
   it("counts positions and unresolved BUY orders without counting terminal orders", async () => {
     const nowMs = Date.parse("2026-07-23T10:00:00.000Z");
     const database = new TradingDatabase(":memory:");

@@ -14,6 +14,8 @@ function optionValue(argv: string[], name: string): string {
   return index >= 0 ? argv[index + 1] ?? "" : "";
 }
 
+const RESUME_LIVE_CONFIRMATION = "RESUME_LIVE_AFTER_REVIEW";
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const command = argv[0] ?? "status";
   const config = loadConfig();
@@ -99,9 +101,25 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           "Bloqueo de emergencia revisado y limpiado; live permanece desactivado.\n"
         );
         break;
+      case "resume-live": {
+        if (optionValue(argv, "--confirm") !== RESUME_LIVE_CONFIRMATION) {
+          throw new Error(
+            `Exact ${RESUME_LIVE_CONFIRMATION} confirmation is required.`
+          );
+        }
+        if (database.getEmergencyStop().active) {
+          await service.clearEmergencyStop("CLEAR_EMERGENCY");
+        }
+        const paperGateResult = await paperGate.result(config.paperGateSkip);
+        await service.activateLive("ACTIVATE_LIVE", paperGateResult.passed);
+        process.stdout.write(
+          "Bloqueo revisado y live reactivado localmente.\n"
+        );
+        break;
+      }
       default:
         throw new Error(
-          "Uso: onboard status|import-key|configure [--confirm-legacy-proxy]|adopt-existing-portfolio --confirm ADOPT_EXISTING_PORTFOLIO|activate-live --confirm ACTIVATE_LIVE|deactivate-live|clear-emergency --confirm CLEAR_EMERGENCY"
+          "Uso: onboard status|import-key|configure [--confirm-legacy-proxy]|adopt-existing-portfolio --confirm ADOPT_EXISTING_PORTFOLIO|activate-live --confirm ACTIVATE_LIVE|deactivate-live|clear-emergency --confirm CLEAR_EMERGENCY|resume-live --confirm RESUME_LIVE_AFTER_REVIEW"
         );
     }
   } finally {

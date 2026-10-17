@@ -342,7 +342,7 @@ describe("OnboardingService live activation provenance", () => {
 
     await expect(
       service.activateLive("ACTIVATE_LIVE", true)
-    ).rejects.toThrow(/new daily risk session requires zero open positions/i);
+    ).rejects.toThrow(/PORTFOLIO_ADOPTION_REQUIRED/);
 
     expect(database.getLiveActivation().active).toBe(false);
     expect(database.countAuditEvents("DAILY_RISK_SESSION_ARMED")).toBe(0);
@@ -399,6 +399,24 @@ describe("OnboardingService live activation provenance", () => {
         true
       )
     ).rejects.toThrow(/zero TRADE activity since midnight Europe\/Madrid/i);
+    expect(database.getLivePortfolioAdoption()).toBeNull();
+  });
+
+  it("does not adopt a portfolio while a remote order remains open", async () => {
+    const database = createDatabase();
+    setBinding(database);
+    const service = createService(
+      database,
+      { clobClientFactory: createReadOnlyFactory([openOrderFixture()]) },
+      portfolioFixture([positionFixture()])
+    );
+
+    await expect(
+      service.adoptExistingPortfolio(
+        ADOPT_EXISTING_PORTFOLIO_CONFIRMATION,
+        true
+      )
+    ).rejects.toThrow(/zero remote open orders/i);
     expect(database.getLivePortfolioAdoption()).toBeNull();
   });
 
@@ -711,6 +729,7 @@ function configFixture(): AppConfig {
     approvalPort: 8787,
     liveEnabled: true,
     paperGateSkip: false,
+    paperGateSkipSource: "default",
     keychainService: "codex-polymarket-guarded",
     clobHost: "https://clob.polymarket.com",
     gammaHost: "https://gamma-api.polymarket.com",

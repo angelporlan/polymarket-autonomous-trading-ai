@@ -102,6 +102,15 @@ export class DatabaseRiskContext implements RiskContextPort {
             (total, order) => total + order.riskMicros,
             0n
           ),
+        agentManagedOpenExposureMicros:
+          paper.lots.reduce(
+            (total, lot) => total + lot.basisMicros,
+            0n
+          ) +
+          paper.pendingBuys.reduce(
+            (total, order) => total + order.riskMicros,
+            0n
+          ),
         marketExposureMicros:
           marketExposureMicros + pendingMarketExposureMicros,
         correlatedExposureMicros,
@@ -163,6 +172,8 @@ export class DatabaseRiskContext implements RiskContextPort {
       dailyPnlMicros: derived.dailyPnlMicros,
       dailyPnlKnown: derived.dailyPnlKnown,
       totalOpenExposureMicros: derived.totalOpenExposureMicros,
+      agentManagedOpenExposureMicros:
+        derived.agentManagedOpenExposureMicros,
       marketExposureMicros: marketPositionExposure + marketOrderExposure,
       correlatedExposureMicros:
         correlatedPositionExposure + correlatedOrderExposure,
@@ -177,8 +188,10 @@ export class DatabaseRiskContext implements RiskContextPort {
     dailyPnlMicros: bigint;
     dailyPnlKnown: boolean;
     totalOpenExposureMicros: bigint;
+    agentManagedOpenExposureMicros: bigint;
     openMarketCount: number;
     liveTradeCount: number;
+    drawdownMicros: bigint;
     emergencyStopped: boolean;
     coolingDownUntilMs: number | null;
   }> {
@@ -191,9 +204,12 @@ export class DatabaseRiskContext implements RiskContextPort {
       dailyPnlMicros: derived.dailyPnlMicros,
       dailyPnlKnown: derived.dailyPnlKnown,
       totalOpenExposureMicros: derived.totalOpenExposureMicros,
+      agentManagedOpenExposureMicros:
+        derived.agentManagedOpenExposureMicros,
       openMarketCount: derived.openMarketCount,
       liveTradeCount:
         this.options.database.countCanaryEligibleExecutions(),
+      drawdownMicros: derived.drawdownMicros,
       emergencyStopped: this.options.database.getEmergencyStop().active,
       coolingDownUntilMs: derived.coolingDownUntilMs
     };
@@ -206,9 +222,11 @@ export class DatabaseRiskContext implements RiskContextPort {
   ): {
     activeProposals: OrderProposal[];
     totalOpenExposureMicros: bigint;
+    agentManagedOpenExposureMicros: bigint;
     openMarketCount: number;
     dailyPnlMicros: bigint;
     dailyPnlKnown: boolean;
+    drawdownMicros: bigint;
     coolingDownUntilMs: number | null;
     positionCorrelationKeys: Map<string, string>;
   } {
@@ -283,10 +301,20 @@ export class DatabaseRiskContext implements RiskContextPort {
       }
     }
 
+    const dayKey = zonedDayKey(nowMs, this.timeZone);
+    const grandfatheredKeys = this.options.database.getGrandfatheredPositionKeys(
+      dayKey
+    );
     const positionExposureMicros = portfolio.positions.reduce(
       (total, position) => total + positionRiskMicros(position),
       0n
     );
+    const agentManagedPositionExposureMicros = portfolio.positions
+      .filter((position) => !grandfatheredKeys.has(positionIdentity(position)))
+      .reduce(
+        (total, position) => total + positionRiskMicros(position),
+        0n
+      );
     const pendingBuyExposureMicros = activeProposals
       .filter((proposal) => proposal.side === "BUY")
       .reduce((total, proposal) => total + proposal.maxLossMicros, 0n);
@@ -300,12 +328,16 @@ export class DatabaseRiskContext implements RiskContextPort {
       openConditionIds.add(proposal.market.conditionId);
     }
 
-    const dayKey = zonedDayKey(nowMs, this.timeZone);
     const dailyRisk = this.options.database.getDailyRiskPnl(
       dayKey,
       portfolio.totalPnlMicros
     );
     const dailyPnlMicros = dailyRisk.pnlMicros;
+    const drawdownMicros = this.options.database.getDailyDrawdownMicros(
+      dayKey,
+      dailyPnlMicros,
+      nowMs
+    );
     let cooldown = this.options.database.getCooldown();
     if (
       dailyPnlMicros <= -DEFAULT_RISK_POLICY.dailyStopMicros &&
@@ -325,9 +357,12 @@ export class DatabaseRiskContext implements RiskContextPort {
       activeProposals,
       totalOpenExposureMicros:
         positionExposureMicros + pendingBuyExposureMicros,
+      agentManagedOpenExposureMicros:
+        agentManagedPositionExposureMicros + pendingBuyExposureMicros,
       openMarketCount: openConditionIds.size,
       dailyPnlMicros,
       dailyPnlKnown: dailyRisk.known,
+      drawdownMicros,
       coolingDownUntilMs: cooldown.untilMs > nowMs ? cooldown.untilMs : null,
       positionCorrelationKeys
     };

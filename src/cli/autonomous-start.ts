@@ -16,10 +16,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   try {
     const account = await runtime.getAccountStatus();
     if (account.status !== "LIVE_READY") {
+      if (
+        account.portfolioAdoptionStatus === "REQUIRED" ||
+        account.portfolioAdoptionStatus === "CHANGED"
+      ) {
+        throw new Error(
+          "PORTFOLIO_ADOPTION_REQUIRED: preserve and register the reconciled portfolio with `npm run onboard -- adopt-existing-portfolio --confirm ADOPT_EXISTING_PORTFOLIO`, then activate live again."
+        );
+      }
       throw new Error(
         `LIVE_NOT_READY: account status is ${account.status}; complete onboarding first.`
       );
     }
+    await runtime.verifyAutonomousStartPreflight();
     const current = await runtime.getTradingSession({ executionMode: "live" });
     let session = current.activeSession;
     let authorization: { authorizedAmountPusd: string } | null = null;
@@ -98,8 +107,8 @@ function parseTtlHours(argv: string[]): number {
   const index = argv.indexOf("--ttl-hours");
   if (index < 0) return DEFAULT_SESSION_TTL_HOURS;
   const value = Number(argv[index + 1]);
-  if (!Number.isFinite(value) || value <= 0 || value > 24) {
-    throw new Error("--ttl-hours must be greater than 0 and at most 24.");
+  if (!Number.isFinite(value) || value <= 0 || value > 8) {
+    throw new Error("--ttl-hours must be greater than 0 and at most 8.");
   }
   return value;
 }

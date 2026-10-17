@@ -192,7 +192,7 @@ El archivo [`.codex/config.toml`](.codex/config.toml) registra el servidor `poly
 ```toml
 [mcp_servers.polymarket]
 enabled = true
-required = false
+required = true
 command = "node"
 args = ["dist/mcp/server.js"]
 cwd = "/Users/angel/devp/polymarket"
@@ -200,13 +200,24 @@ startup_timeout_sec = 15
 tool_timeout_sec = 60
 ```
 
-Tras compilar, reinicia Codex o recarga la configuración MCP y consulta primero `get_account_status`. Mantén `POLYMARKET_LIVE_ENABLED=false` durante lectura y paper trading.
+Tras compilar, ejecuta `npm run mcp:doctor`, reinicia Codex, comprueba `/mcp` y consulta primero `get_account_status`. El diagnóstico valida configuración, build, base de datos, cadena de auditoría y handshake de herramientas sin activar live ni invocar firma. Mantén `POLYMARKET_LIVE_ENABLED=false` durante lectura y paper trading.
 
-`PAPER_GATE_SKIP=true` solo omite la evaluación de duración, número de operaciones,
+`PAPER_GATE_SKIP=true` en el `.env` local solo omite la evaluación de duración, número de operaciones,
 PnL y drawdown del PaperGate. El estado se muestra como `skipped` y siguen siendo
 obligatorios la cuenta verificada, Keychain, la activación local, geoblock, límites,
 reconciliación, propuesta staged intacta y comprobaciones loopback. Es un override explícito
-de configuración no secreta, no una autorización de live.
+de configuración no secreta, no una autorización de live; cualquier valor procedente de
+la configuración versionada o del entorno directo se marca como inválido para live.
+
+Para observar mercados y posiciones en modo estrictamente shadow mientras live está bloqueado:
+
+```bash
+npm run shadow:start
+```
+
+Este proceso fuerza `POLYMARKET_LIVE_ENABLED=false` y usa `data/shadow.sqlite`, separado del ledger
+live. Solo consulta datos públicos y registra recomendaciones; no crea sesiones live, firma, envía
+órdenes, adopta carteras ni limpia bloqueos.
 
 ## Alta local
 
@@ -236,7 +247,7 @@ npm run autonomous:start
 
 `import-key` abre la interfaz nativa oculta y escribe directamente en el Llavero. `configure` comprueba signer, funder, perfil y tipo de wallet; usa `--confirm-legacy-proxy` solo cuando la comprobación explícita determine que la cuenta existente es el proxy legado tipo 1. `activate-live` seguirá fallando hasta que la puerta paper y el resto de controles estén satisfechos.
 
-Si la cuenta ya tiene posiciones abiertas, `adopt-existing-portfolio` permite establecer un baseline diario verificable sin introducir un saldo manual ni mover fondos. Exige cartera pública consistente, cero actividad desde medianoche de `Europe/Madrid`, cuenta autenticada en modo que permita órdenes, auditoría válida, cooldown inactivo y exposición por debajo del techo fijo. Guarda únicamente un hash de identidad de las posiciones; cualquier cambio externo invalida la adopción. Las posiciones adoptadas sin procedencia local siguen bloqueadas para salidas automáticas hasta que se reconcilien.
+Si la cuenta ya tiene posiciones abiertas, `adopt-existing-portfolio` permite establecer un baseline diario verificable sin introducir un saldo manual ni mover fondos. Exige cartera pública consistente, cero actividad desde medianoche de `Europe/Madrid`, ausencia de órdenes abiertas, cuenta autenticada en modo que permita órdenes, auditoría válida, cooldown inactivo y exposición por debajo del techo fijo. Guarda únicamente un hash de identidad de las posiciones; cualquier cambio externo invalida la adopción. Estas posiciones quedan `GRANDFATHERED_REDUCE_ONLY`: cuentan para exposición y PnL, no pueden incrementarse y no consumen la plaza canary destinada a una posición nueva.
 
 ### Arranque autónomo persistente
 
@@ -257,15 +268,21 @@ Después de `npm run build` también puede ejecutarse directamente:
 node dist/cli/autonomous-start.js
 ```
 
-La duración por defecto es de 8 horas y puede ajustarse entre 1 y 24 horas:
+La duración por defecto es de 8 horas y puede ajustarse entre 1 y 8 horas:
 
 ```bash
-npm run autonomous:start -- --ttl-hours 12
+npm run autonomous:start -- --ttl-hours 8
 ```
 
 El comando imprime la sesión activa, el presupuesto autorizado, el vencimiento y el estado del supervisor. Una sesión activa se reutiliza en ejecuciones posteriores; al caducar, la renovación exige una nueva autorización nativa. No hay confirmaciones por orden. El daemon se detiene de forma segura al expirar la sesión o ante un bloqueo de emergencia.
 
-El supervisor evalúa entradas aproximadamente cada 10 segundos y supervisa las posiciones en el mismo ciclo. No opera por momentum puro: necesita un `ResearchBundle` vigente, verificable y con dos dominios independientes. `autonomous:start` no inventa probabilidades ni acepta saldo manual; si faltan investigación, snapshots o capacidad de riesgo, el ciclo termina sin enviar una orden.
+El supervisor reconcilia y supervisa posiciones aproximadamente cada 10 segundos, pero no abre
+entradas live por sí mismo. Las entradas live pertenecen al lease de una conversación Codex;
+empiezan con `prepare_agent_cycle`, que usa el market WebSocket y puede saltar de forma aislada
+un candidato sin book. Después necesitan `prepare_agent_evidence` ligado al `cycleId` y
+`candidateSnapshotId`, con snapshot CLOB/Gamma fresco y dos dominios HTTPS
+independientes. Si faltan investigación, snapshots o capacidad de riesgo, el ciclo termina sin
+enviar una orden.
 
 Para que una IA anfitriona decida las entradas durante una conversación activa existe el contrato portable [`docs/AI_AUTONOMOUS_TRADING.md`](docs/AI_AUTONOMOUS_TRADING.md). La IA adquiere `start_agent_run`, renueva el heartbeat y usa evidencia de mercado seguida exactamente de `stage_order → execute_staged_order`. Mientras el lease está activo el daemon no abre entradas, aunque sigue conciliando y supervisando salidas. Stop, `SIGTERM`, cierre de conversación o caducidad del lease bloquean live y dejan la sesión reconciliable.
 
@@ -276,9 +293,10 @@ Para cerrar live o revisar un incidente:
 ```bash
 npm run onboard -- deactivate-live
 npm run onboard -- clear-emergency --confirm CLEAR_EMERGENCY
+npm run onboard -- resume-live --confirm RESUME_LIVE_AFTER_REVIEW
 ```
 
-La limpieza del bloqueo exige que no quede ninguna ejecución local ambigua, que no existan órdenes remotas abiertas y que cada ejecución terminal coincida con su propuesta. Live permanece desactivado después de la revisión.
+La limpieza del bloqueo exige que no quede ninguna ejecución local ambigua, que no existan órdenes remotas abiertas y que cada ejecución terminal coincida con su propuesta. `clear-emergency` deja live desactivado; `resume-live` ejecuta esa misma conciliación y, con una única confirmación local explícita, vuelve a validar y activar live sin adoptar carteras ni ampliar el presupuesto.
 
 ## Datos, auditoría y recuperación
 

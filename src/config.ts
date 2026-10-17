@@ -39,6 +39,7 @@ export interface AppConfig {
   approvalPort: number;
   liveEnabled: boolean;
   paperGateSkip: boolean;
+  paperGateSkipSource: "dotenv" | "environment" | "default";
   keychainService: "codex-polymarket-guarded";
   clobHost: "https://clob.polymarket.com";
   gammaHost: "https://gamma-api.polymarket.com";
@@ -48,8 +49,8 @@ export interface AppConfig {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  const mergedEnv = env === process.env ? loadDotEnv(env) : env;
-  const parsed = envSchema.parse(mergedEnv);
+  const loaded = env === process.env ? loadDotEnv(env) : { env, paperGateSkipFromDotEnv: false };
+  const parsed = envSchema.parse(loaded.env);
   const polygonRpcUrls = parsePolygonRpcUrls(
     parsed.POLYGON_RPC_URLS,
     parsed.POLYGON_RPC_URL
@@ -66,6 +67,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     approvalPort: parsed.POLYMARKET_APPROVAL_PORT,
     liveEnabled: parsed.POLYMARKET_LIVE_ENABLED,
     paperGateSkip: parsed.PAPER_GATE_SKIP,
+    paperGateSkipSource: loaded.paperGateSkipFromDotEnv
+      ? "dotenv"
+      : env.PAPER_GATE_SKIP === undefined
+        ? "default"
+        : "environment",
     keychainService: parsed.POLYMARKET_KEYCHAIN_SERVICE,
     clobHost: "https://clob.polymarket.com",
     gammaHost: "https://gamma-api.polymarket.com",
@@ -106,13 +112,17 @@ function parsePolygonRpcUrls(value: string, fallback: string): string[] {
   return urls;
 }
 
-function loadDotEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function loadDotEnv(env: NodeJS.ProcessEnv): {
+  env: NodeJS.ProcessEnv;
+  paperGateSkipFromDotEnv: boolean;
+} {
   const envPath = path.resolve(".env");
   if (!fs.existsSync(envPath)) {
-    return env;
+    return { env, paperGateSkipFromDotEnv: false };
   }
   const content = fs.readFileSync(envPath, "utf8");
   const merged = { ...env };
+  let paperGateSkipFromDotEnv = false;
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
@@ -126,6 +136,11 @@ function loadDotEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
       ) {
         value = value.slice(1, -1);
       }
+      if (key === "PAPER_GATE_SKIP") {
+        merged[key] = value;
+        paperGateSkipFromDotEnv = true;
+        continue;
+      }
       if (
         merged[key] === undefined ||
         merged[key] === "" ||
@@ -135,5 +150,5 @@ function loadDotEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
       }
     }
   }
-  return merged;
+  return { env: merged, paperGateSkipFromDotEnv };
 }

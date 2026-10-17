@@ -16,7 +16,7 @@ import type {
 
 const MAX_REDIRECTS = 3;
 const MAX_RESPONSE_BYTES = 2_000_000;
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 5_000;
 const ACCEPTED_CONTENT_TYPES = new Set([
   "text/html",
   "text/plain",
@@ -78,8 +78,6 @@ export class ResearchVerifier {
       input.eventVolatilityClass === "FAST"
         ? CRISIS_SOURCE_AGE_MS
         : MAX_SOURCE_AGE_MS;
-    const verifiedSources: VerifiedSource[] = [];
-    const domains = new Set<string>();
     const seenUrls = new Set<string>();
     const sourceEvidenceByUrl = new Map(
       input.sourceEvidence.map((candidate) => [
@@ -88,17 +86,23 @@ export class ResearchVerifier {
       ])
     );
 
-    for (const requestedUrl of input.requestedUrls) {
+    const requested = input.requestedUrls.map((requestedUrl) => {
       const normalizedRequestedUrl = validatePublicSourceUrl(requestedUrl);
       if (seenUrls.has(normalizedRequestedUrl)) {
         throw new ResearchVerificationError("RESEARCH_SOURCE_DUPLICATE");
       }
       seenUrls.add(normalizedRequestedUrl);
-      const fetched = await this.fetchSource(normalizedRequestedUrl);
       const sourceEvidence = sourceEvidenceByUrl.get(normalizedRequestedUrl);
       if (sourceEvidence === undefined) {
         throw new ResearchVerificationError("RESEARCH_SOURCE_EVIDENCE_MISSING");
       }
+      return { normalizedRequestedUrl, sourceEvidence };
+    });
+    const verifiedSources = await Promise.all(requested.map(async ({
+      normalizedRequestedUrl,
+      sourceEvidence
+    }) => {
+      const fetched = await this.fetchSource(normalizedRequestedUrl);
       const source = parseVerifiedSource(
         normalizedRequestedUrl,
         fetched.finalUrl,
@@ -113,10 +117,12 @@ export class ResearchVerifier {
           `RESEARCH_SOURCE_TOO_OLD: ${source.finalUrl}`
         );
       }
-      domains.add(source.registrableDomain);
-      verifiedSources.push({ ...source, ...semanticEvidence });
-    }
+      return { ...source, ...semanticEvidence };
+    }));
 
+    const domains = new Set(
+      verifiedSources.map((source) => source.registrableDomain)
+    );
     if (domains.size < 2) {
       throw new ResearchVerificationError("RESEARCH_DOMAINS_NOT_INDEPENDENT");
     }

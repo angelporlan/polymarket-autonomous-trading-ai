@@ -25,6 +25,12 @@ import {
   canonicalCorrelationKey
 } from "../domain/types.js";
 import { RISK_POLICY_VERSION } from "../domain/risk-policy.js";
+import {
+  AGENT_POLICY_STATE_KEY,
+  DEFAULT_AGENT_POLICY,
+  validateAgentPolicy,
+  type AgentOperationalPolicy
+} from "../domain/agent-policy.js";
 import { hashCanonical, verifyProposalHash } from "../domain/proposals.js";
 import {
   normalizeClobOrderStatus,
@@ -77,6 +83,16 @@ export interface AuditEventRecord {
   payload: unknown;
   previousHash: string;
   eventHash: string;
+}
+
+interface AuditDatabaseRow {
+  id: number;
+  created_at_ms: number;
+  event_type: string;
+  subject_id: string | null;
+  payload_json: string;
+  previous_hash: string;
+  event_hash: string;
 }
 
 export interface AccountBindingRecord {
@@ -137,6 +153,8 @@ export class TradingDatabase {
   startAgentRun(input: {
     host: string;
     model: string;
+    controllerId?: string;
+    runtimeInstanceId?: string;
     nowMs?: number;
   }): AgentRun {
     const nowMs = input.nowMs ?? Date.now();
@@ -188,6 +206,7 @@ export class TradingDatabase {
           throw new Error("AGENT_RUN_EXPIRED_LOCKED");
         }
       }
+      const runtimeInstanceId = input.runtimeInstanceId ?? input.controllerId;
       const run: AgentRun = {
         agentRunId: `agent_${randomUUID()}`,
         host,
@@ -197,7 +216,18 @@ export class TradingDatabase {
         lastHeartbeatAtMs: nowMs,
         leaseExpiresAtMs: nowMs + AGENT_RUN_LEASE_MS,
         stoppedAtMs: null,
-        stopReason: null
+        stopReason: null,
+        policyVersion: this.getAgentPolicy().version,
+        phase: "STARTING",
+        nextCycleAtMs: nowMs + 30_000,
+        currentCycleId: null,
+        lastToolActivityAtMs: nowMs,
+        ...(runtimeInstanceId === undefined
+          ? {}
+          : {
+              controllerId: runtimeInstanceId,
+              runtimeInstanceId
+            })
       };
       this.db.prepare(
         `INSERT INTO agent_runs
@@ -229,10 +259,15 @@ export class TradingDatabase {
     }
   }
 
-  heartbeatAgentRun(agentRunId: string, nowMs = Date.now()): AgentRun {
+  heartbeatAgentRun(agentRunId: string, nowMs = Date.now(), controllerId?: string): AgentRun {
     this.beginImmediate();
     try {
       const run = this.readAgentRun(agentRunId);
+      const owner = run?.runtimeInstanceId ?? run?.controllerId;
+      if (owner !== undefined && owner !== controllerId) {
+        this.rollbackTransaction();
+        throw new Error("AGENT_RUN_INSTANCE_MISMATCH");
+      }
       if (run === null || run.status !== "ACTIVE" || run.leaseExpiresAtMs <= nowMs) {
         if (run?.status === "ACTIVE" && run.leaseExpiresAtMs <= nowMs) {
           const expired = { ...run, status: "EXPIRED" as const, stoppedAtMs: nowMs, stopReason: "AGENT_LEASE_EXPIRED" };
@@ -249,7 +284,10 @@ export class TradingDatabase {
       const updated: AgentRun = {
         ...run,
         lastHeartbeatAtMs: nowMs,
-        leaseExpiresAtMs: nowMs + AGENT_RUN_LEASE_MS
+        leaseExpiresAtMs: nowMs + AGENT_RUN_LEASE_MS,
+        phase: "HEARTBEAT",
+        nextCycleAtMs: nowMs + 30_000,
+        lastToolActivityAtMs: nowMs
       };
       this.updateAgentRunRow(updated, nowMs);
       this.appendAgentRunEvent(agentRunId, "HEARTBEAT", {
@@ -258,6 +296,72 @@ export class TradingDatabase {
       });
       this.appendAudit("AGENT_RUN_HEARTBEAT", agentRunId, {
         lastHeartbeatAtMs: nowMs,
+        leaseExpiresAtMs: updated.leaseExpiresAtMs
+      });
+      this.commitTransaction();
+      return updated;
+    } catch (error) {
+      if (this.transactionActive) this.rollbackTransaction();
+      throw error;
+    }
+  }
+
+  touchAgentRun(input: {
+    agentRunId: string;
+    runtimeInstanceId: string;
+    phase: AgentRun["phase"];
+    currentCycleId?: string | null;
+    nowMs?: number;
+  }): AgentRun {
+    const nowMs = input.nowMs ?? Date.now();
+    this.beginImmediate();
+    try {
+      const run = this.readAgentRun(input.agentRunId);
+      const owner = run?.runtimeInstanceId ?? run?.controllerId;
+      if (run === null || owner !== input.runtimeInstanceId) {
+        this.rollbackTransaction();
+        throw new Error("AGENT_RUN_INSTANCE_MISMATCH");
+      }
+      if (run.status !== "ACTIVE" || run.leaseExpiresAtMs <= nowMs) {
+        if (run.status === "ACTIVE") {
+          const expired: AgentRun = {
+            ...run,
+            status: "EXPIRED",
+            stoppedAtMs: nowMs,
+            stopReason: "AGENT_LEASE_EXPIRED",
+            leaseExpiresAtMs: nowMs,
+            phase: "STOPPING",
+            nextCycleAtMs: null,
+            lastToolActivityAtMs: nowMs
+          };
+          this.updateAgentRunRow(expired, nowMs);
+          this.appendAgentRunEvent(run.agentRunId, "EXPIRED", {
+            reason: expired.stopReason,
+            atMs: nowMs
+          });
+          this.lockInTransaction("AGENT_RUN_EXPIRED", nowMs);
+          this.commitTransaction();
+        } else {
+          this.rollbackTransaction();
+        }
+        throw new Error("AGENT_RUN_NOT_ACTIVE");
+      }
+      const updated: AgentRun = {
+        ...run,
+        phase: input.phase,
+        currentCycleId:
+          input.currentCycleId === undefined
+            ? run.currentCycleId ?? null
+            : input.currentCycleId,
+        lastHeartbeatAtMs: nowMs,
+        lastToolActivityAtMs: nowMs,
+        leaseExpiresAtMs: nowMs + AGENT_RUN_LEASE_MS
+      };
+      this.updateAgentRunRow(updated, nowMs);
+      this.appendAgentRunEvent(run.agentRunId, "TOOL_ACTIVITY", {
+        phase: updated.phase,
+        currentCycleId: updated.currentCycleId,
+        atMs: nowMs,
         leaseExpiresAtMs: updated.leaseExpiresAtMs
       });
       this.commitTransaction();
@@ -281,7 +385,7 @@ export class TradingDatabase {
     return run;
   }
 
-  stopAgentRun(agentRunId: string, reason: string, nowMs = Date.now()): AgentRun {
+  stopAgentRun(agentRunId: string, reason: string, nowMs = Date.now(), controllerId?: string): AgentRun {
     const boundedReason = reason.trim().slice(0, 500) || "USER_REQUESTED_STOP";
     this.beginImmediate();
     try {
@@ -289,6 +393,11 @@ export class TradingDatabase {
       if (run === null) {
         this.rollbackTransaction();
         throw new Error("AGENT_RUN_NOT_FOUND");
+      }
+      const owner = run.runtimeInstanceId ?? run.controllerId;
+      if (owner !== undefined && owner !== controllerId) {
+        this.rollbackTransaction();
+        throw new Error("AGENT_RUN_INSTANCE_MISMATCH");
       }
       if (run.status === "STOPPED" || run.status === "EXPIRED" || run.status === "LOCKED") {
         this.commitTransaction();
@@ -299,7 +408,11 @@ export class TradingDatabase {
         status: "STOPPED",
         stoppedAtMs: nowMs,
         stopReason: boundedReason,
-        leaseExpiresAtMs: nowMs
+        leaseExpiresAtMs: nowMs,
+        phase: "STOPPING",
+        nextCycleAtMs: null,
+        currentCycleId: null,
+        lastToolActivityAtMs: nowMs
       };
       this.updateAgentRunRow(stopped, nowMs);
       this.appendAgentRunEvent(agentRunId, "STOPPED", {
@@ -1099,6 +1212,10 @@ export class TradingDatabase {
   }
 
   setEmergencyStop(active: boolean, reason: string, nowMs = Date.now()): void {
+    const current = this.getEmergencyStop();
+    if (current.active === active && current.reason === reason) {
+      return;
+    }
     this.setState(
       "emergency_stop",
       stringifyWithBigInts({ active, reason, updatedAtMs: nowMs }),
@@ -1115,6 +1232,60 @@ export class TradingDatabase {
     return value
       ? parseWithBigInts(value)
       : { active: false, reason: "", updatedAtMs: 0 };
+  }
+
+  getAgentPolicy(): AgentOperationalPolicy {
+    const value = this.getState(AGENT_POLICY_STATE_KEY);
+    if (value === null) {
+      return DEFAULT_AGENT_POLICY;
+    }
+    return validateAgentPolicy(parseWithBigInts<AgentOperationalPolicy>(value));
+  }
+
+  setAgentPolicy(policy: AgentOperationalPolicy, nowMs = Date.now()): void {
+    const validated = validateAgentPolicy(policy);
+    this.setState(AGENT_POLICY_STATE_KEY, stringifyWithBigInts(validated), nowMs);
+    this.appendAudit("AGENT_POLICY_ADJUSTED", null, {
+      policyVersion: validated.version,
+      policy: validated,
+      adjustedAtMs: nowMs
+    });
+  }
+
+  recordAgentMarketLoss(
+    conditionId: string,
+    lossAtMs: number = Date.now()
+  ): void {
+    const normalizedConditionId = conditionId.trim().toLowerCase();
+    if (
+      normalizedConditionId.length === 0 ||
+      normalizedConditionId.length > 100 ||
+      !Number.isSafeInteger(lossAtMs) ||
+      lossAtMs <= 0
+    ) {
+      throw new Error("AGENT_MARKET_LOSS_INVALID");
+    }
+    const current = this.getAgentPolicy();
+    if (
+      current.lastLossAtMs !== null &&
+      current.lastLossAtMs >= lossAtMs
+    ) {
+      return;
+    }
+    const updated = validateAgentPolicy({
+      ...current,
+      lastLossMarketConditionId: normalizedConditionId,
+      lastLossAtMs: lossAtMs
+    });
+    this.setState(
+      AGENT_POLICY_STATE_KEY,
+      stringifyWithBigInts(updated),
+      lossAtMs
+    );
+    this.appendAudit("AGENT_MARKET_LOSS_RECORDED", normalizedConditionId, {
+      conditionId: normalizedConditionId,
+      lossAtMs
+    });
   }
 
   setLiveActivation(active: boolean, nowMs = Date.now()): void {
@@ -1167,6 +1338,24 @@ export class TradingDatabase {
     return value
       ? parseWithBigInts<LivePortfolioAdoptionRecord>(value)
       : null;
+  }
+
+  getGrandfatheredPositionKeys(dayKey: string): ReadonlySet<string> {
+    const adoption = this.getLivePortfolioAdoption();
+    if (adoption === null || adoption.dayKey !== dayKey) {
+      return new Set();
+    }
+    return new Set(adoption.positionKeys);
+  }
+
+  isGrandfatheredPosition(
+    conditionId: string,
+    tokenId: string,
+    dayKey: string
+  ): boolean {
+    return this.getGrandfatheredPositionKeys(dayKey).has(
+      `${conditionId.toLowerCase()}:${tokenId}`
+    );
   }
 
   setAccountBinding(binding: AccountBindingRecord): void {
@@ -1313,6 +1502,27 @@ export class TradingDatabase {
       pnlMicros: currentTotalPnlMicros - session.baselineMicros,
       armedAtMs: session.armedAtMs
     };
+  }
+
+  getDailyDrawdownMicros(
+    dayKey: string,
+    currentPnlMicros: bigint,
+    nowMs = Date.now()
+  ): bigint {
+    const fingerprint = this.dailyRiskAccountFingerprint();
+    if (fingerprint === null) return 0n;
+    const key = `daily_pnl_high_water:${fingerprint}:${dayKey}`;
+    const value = this.getState(key);
+    if (value === null) {
+      this.setState(key, stringifyWithBigInts({ highWaterMicros: currentPnlMicros }), nowMs);
+      return 0n;
+    }
+    const parsed = parseWithBigInts<{ highWaterMicros: bigint }>(value);
+    if (currentPnlMicros > parsed.highWaterMicros) {
+      this.setState(key, stringifyWithBigInts({ highWaterMicros: currentPnlMicros }), nowMs);
+      return 0n;
+    }
+    return parsed.highWaterMicros - currentPnlMicros;
   }
 
   setCooldownUntil(
@@ -1996,7 +2206,7 @@ export class TradingDatabase {
         }
       }
 
-      if (proposal.intent === "ENTRY") {
+      if (proposal.decisionOwner === "agent" || proposal.intent === "ENTRY") {
         const activeAgent = this.db.prepare(
           `SELECT agent_run_id, status, lease_expires_at_ms
            FROM agent_runs WHERE status = 'ACTIVE' ORDER BY started_at_ms DESC LIMIT 1`
@@ -2010,48 +2220,50 @@ export class TradingDatabase {
             this.rollbackTransaction();
             return false;
           }
-        } else if (activeAgent !== undefined && activeAgent.lease_expires_at_ms > nowMs) {
+        } else if (proposal.intent === "ENTRY" && activeAgent !== undefined && activeAgent.lease_expires_at_ms > nowMs) {
           this.rollbackTransaction();
           return false;
         }
-        if (proposal.sessionId === null || proposal.sessionId !== sessionId) {
-          this.rollbackTransaction();
-          return false;
-        }
-        const sessionRow = this.db
-          .prepare("SELECT payload_json FROM trading_sessions WHERE id = ? AND status = 'ACTIVE'")
-          .get(proposal.sessionId) as ProposalRow | undefined;
-        if (!sessionRow) {
-          this.rollbackTransaction();
-          return false;
-        }
-        const session = parseWithBigInts<TradingSession>(sessionRow.payload_json);
-        if (
-          nowMs >= session.expiresAtMs ||
-          session.executionMode !== "live" ||
-          session.remainingBudgetMicros < proposal.maxLossMicros
-        ) {
-          this.rollbackTransaction();
-          return false;
-        }
+        if (proposal.intent === "ENTRY") {
+          if (proposal.sessionId === null || proposal.sessionId !== sessionId) {
+            this.rollbackTransaction();
+            return false;
+          }
+          const sessionRow = this.db
+            .prepare("SELECT payload_json FROM trading_sessions WHERE id = ? AND status = 'ACTIVE'")
+            .get(proposal.sessionId) as ProposalRow | undefined;
+          if (!sessionRow) {
+            this.rollbackTransaction();
+            return false;
+          }
+          const session = parseWithBigInts<TradingSession>(sessionRow.payload_json);
+          if (
+            nowMs >= session.expiresAtMs ||
+            session.executionMode !== "live" ||
+            session.remainingBudgetMicros < proposal.maxLossMicros
+          ) {
+            this.rollbackTransaction();
+            return false;
+          }
 
-        const newRemaining = session.remainingBudgetMicros - proposal.maxLossMicros;
-        const newStatus = newRemaining === 0n ? "EXHAUSTED" : "ACTIVE";
-        const updatedSession: TradingSession = {
-          ...session,
-          remainingBudgetMicros: newRemaining,
-          status: newStatus
-        };
-        const sessionUpdate = this.db
-          .prepare(
-            `UPDATE trading_sessions
-             SET status = ?, payload_json = ?
-             WHERE id = ? AND status = 'ACTIVE'`
-          )
-          .run(newStatus, stringifyWithBigInts(updatedSession), proposal.sessionId);
-        if (sessionUpdate.changes !== 1) {
-          this.rollbackTransaction();
-          return false;
+          const newRemaining = session.remainingBudgetMicros - proposal.maxLossMicros;
+          const newStatus = newRemaining === 0n ? "EXHAUSTED" : "ACTIVE";
+          const updatedSession: TradingSession = {
+            ...session,
+            remainingBudgetMicros: newRemaining,
+            status: newStatus
+          };
+          const sessionUpdate = this.db
+            .prepare(
+              `UPDATE trading_sessions
+               SET status = ?, payload_json = ?
+               WHERE id = ? AND status = 'ACTIVE'`
+            )
+            .run(newStatus, stringifyWithBigInts(updatedSession), proposal.sessionId);
+          if (sessionUpdate.changes !== 1) {
+            this.rollbackTransaction();
+            return false;
+          }
         }
       }
 
@@ -2223,70 +2435,16 @@ export class TradingDatabase {
   }
 
   verifyAuditChain(): boolean {
-    const rows = this.auditRows();
-    const markerIndex = rows.findIndex(
-      (row) => row.event_type === AUDIT_RECONCILIATION_EVENT
-    );
-    let firstInvalidEventId: number | null = null;
-    if (markerIndex >= 0) {
-      const markerPayload = parseWithBigInts<Record<string, unknown>>(
-        rows[markerIndex]!.payload_json
-      );
-      const candidate = markerPayload.firstInvalidEventId;
-      if (
-        typeof candidate !== "number" ||
-        !Number.isSafeInteger(candidate) ||
-        candidate <= 0
-      ) {
-        return false;
-      }
-      firstInvalidEventId = candidate;
-    }
-    let previousHash = "GENESIS";
-    for (let index = 0; index < rows.length; index += 1) {
-      const row = rows[index]!;
-      if (!verifyAuditRowSelfHash(row)) {
-        return false;
-      }
-      const afterForkMarker = markerIndex >= 0 && index > markerIndex;
-      const beforeDeclaredFork =
-        markerIndex >= 0 && row.id < firstInvalidEventId!;
-      const atOrBeforeNormalChain = markerIndex < 0 || beforeDeclaredFork;
-      if (atOrBeforeNormalChain && row.previous_hash !== previousHash) {
-        return false;
-      }
-      if (markerIndex >= 0 && index === markerIndex && row.previous_hash !== previousHash) {
-        return false;
-      }
-      if (afterForkMarker && row.previous_hash !== previousHash) return false;
-      previousHash = row.event_hash;
-    }
-    return true;
+    return verifyAuditRows(this.auditRows());
   }
 
-  private auditRows(): Array<{
-    id: number;
-    created_at_ms: number;
-    event_type: string;
-    subject_id: string | null;
-    payload_json: string;
-    previous_hash: string;
-    event_hash: string;
-  }> {
+  private auditRows(): Array<AuditDatabaseRow> {
     return this.db
       .prepare(
         `SELECT id, created_at_ms, event_type, subject_id, payload_json, previous_hash, event_hash
          FROM audit_events ORDER BY id ASC`
       )
-      .all() as Array<{
-      id: number;
-      created_at_ms: number;
-      event_type: string;
-      subject_id: string | null;
-      payload_json: string;
-      previous_hash: string;
-      event_hash: string;
-    }>;
+      .all() as unknown as AuditDatabaseRow[];
   }
 
   private expireInterruptedExecutions(nowMs: number): void {
@@ -2599,6 +2757,69 @@ function verifyAuditRowSelfHash(row: {
     return expected === row.event_hash;
   } catch {
     return false;
+  }
+}
+
+function verifyAuditRows(rows: AuditDatabaseRow[]): boolean {
+  const markerIndex = rows.findIndex(
+    (row) => row.event_type === AUDIT_RECONCILIATION_EVENT
+  );
+  let firstInvalidEventId: number | null = null;
+  if (markerIndex >= 0) {
+    try {
+      const markerPayload = parseWithBigInts<Record<string, unknown>>(
+        rows[markerIndex]!.payload_json
+      );
+      const candidate = markerPayload.firstInvalidEventId;
+      if (
+        typeof candidate !== "number" ||
+        !Number.isSafeInteger(candidate) ||
+        candidate <= 0
+      ) {
+        return false;
+      }
+      firstInvalidEventId = candidate;
+    } catch {
+      return false;
+    }
+  }
+  let previousHash = "GENESIS";
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]!;
+    if (!verifyAuditRowSelfHash(row)) return false;
+    const afterForkMarker = markerIndex >= 0 && index > markerIndex;
+    const beforeDeclaredFork =
+      markerIndex >= 0 && row.id < firstInvalidEventId!;
+    const atOrBeforeNormalChain = markerIndex < 0 || beforeDeclaredFork;
+    if (atOrBeforeNormalChain && row.previous_hash !== previousHash) {
+      return false;
+    }
+    if (
+      markerIndex >= 0 &&
+      index === markerIndex &&
+      row.previous_hash !== previousHash
+    ) {
+      return false;
+    }
+    if (afterForkMarker && row.previous_hash !== previousHash) return false;
+    previousHash = row.event_hash;
+  }
+  return true;
+}
+
+/** Verifies the append-only ledger without running migrations or recovery. */
+export function verifyAuditChainReadOnly(filename: string): boolean {
+  const database = new DatabaseSync(filename, { readOnly: true });
+  try {
+    const rows = database
+      .prepare(
+        `SELECT id, created_at_ms, event_type, subject_id, payload_json, previous_hash, event_hash
+         FROM audit_events ORDER BY id ASC`
+      )
+      .all() as unknown as AuditDatabaseRow[];
+    return verifyAuditRows(rows);
+  } finally {
+    database.close();
   }
 }
 

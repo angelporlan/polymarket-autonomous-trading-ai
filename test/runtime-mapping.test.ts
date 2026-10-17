@@ -69,7 +69,10 @@ vi.mock("../src/polymarket/live-adapter.js", () => ({
   }
 }));
 
-import { createMcpToolDependencies } from "../src/runtime.js";
+import {
+  createMcpToolDependencies,
+  PolymarketRuntime
+} from "../src/runtime.js";
 
 const PROFILE_ADDRESS = `0x${"a".repeat(40)}`;
 const savedEnvironment = {
@@ -107,6 +110,30 @@ afterEach(async () => {
 });
 
 describe("runtime MCP boundary mapping", () => {
+  it("clears the prior market channel and ephemeral snapshots before reuse", async () => {
+    const runtime = new PolymarketRuntime();
+    const stop = vi.fn();
+    const internals = runtime as unknown as {
+      marketChannel: { stop(): void } | null;
+      marketChannelTokens: string[];
+      agentCycleSnapshots: Map<string, unknown>;
+      resetAgentMarketChannel(): void;
+    };
+    internals.marketChannel = { stop };
+    internals.marketChannelTokens = ["101", "202"];
+    internals.agentCycleSnapshots.set("snapshot-old", {});
+
+    try {
+      internals.resetAgentMarketChannel();
+      expect(stop).toHaveBeenCalledOnce();
+      expect(internals.marketChannel).toBeNull();
+      expect(internals.marketChannelTokens).toEqual([]);
+      expect(internals.agentCycleSnapshots.size).toBe(0);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("maps portfolio, candidate, and order-book values to schema-safe decimal strings without network access", async () => {
     const capturedAtMs = Date.parse("2026-07-23T14:00:00.000Z");
     const snapshot = marketFixture(capturedAtMs);

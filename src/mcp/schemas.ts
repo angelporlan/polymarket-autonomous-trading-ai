@@ -74,6 +74,7 @@ export const paperGateSchema = z
     maxDrawdownPusd: nonNegativeDecimalSchema,
     riskViolations: z.number().int().nonnegative(),
     reconciliationErrors: z.number().int().nonnegative(),
+    skipSource: z.enum(["dotenv", "environment", "default"]),
     reasons: z.array(z.string().min(1))
   })
   .strict();
@@ -114,7 +115,12 @@ export const marketSnapshotSchema = z
     bids: z.array(priceLevelSchema),
     asks: z.array(priceLevelSchema),
     geoblockStatus: z.enum(["allowed", "blocked", "unknown"]),
-    capturedAt: timestampSchema
+    capturedAt: timestampSchema,
+    sourceTimestamp: timestampSchema.optional(),
+    receivedAt: timestampSchema.optional(),
+    channelGeneration: z.number().int().nonnegative().optional(),
+    bookHash: z.string().trim().min(1).max(256).optional(),
+    marketDataSource: z.enum(["REST", "WEBSOCKET"]).optional()
   })
   .strict();
 
@@ -130,7 +136,10 @@ export const portfolioPositionSchema = z
     currentValuePusd: nonNegativeDecimalSchema,
     cashPnlPusd: signedDecimalSchema,
     realizedPnlPusd: signedDecimalSchema,
-    endTime: timestampSchema
+    endTime: timestampSchema,
+    managementPolicy: z
+      .enum(["AGENT_MANAGED", "GRANDFATHERED_REDUCE_ONLY"])
+      .optional()
   })
   .strict();
 
@@ -246,6 +255,24 @@ export const getAccountStatusOutputSchema = z
     l2CredentialsReady: z.boolean(),
     liveEnabled: z.boolean(),
     emergencyStopped: z.boolean(),
+    serverVersion: z.string().trim().min(1),
+    buildId: z.string().trim().min(1),
+    runtimeInstanceId: identifierSchema,
+    portfolioAdoptionStatus: z.enum([
+      "NOT_REQUIRED",
+      "REQUIRED",
+      "CURRENT",
+      "CHANGED",
+      "UNKNOWN"
+    ]),
+    marketChannel: z
+      .object({
+        state: z.enum(["idle", "connecting", "running", "failed", "stopped"]),
+        generation: z.number().int().nonnegative(),
+        subscribedTokenCount: z.number().int().nonnegative(),
+        freshBookCount: z.number().int().nonnegative()
+      })
+      .strict(),
     paperGate: paperGateSchema,
     capturedAt: timestampSchema
   })
@@ -330,6 +357,34 @@ export const getRiskStatusOutputSchema = z
         })
         .strict()
     ),
+    agentPolicy: z.object({
+      version: z.string().trim().min(1),
+      decisionIntervalSeconds: z.number().int().min(30).max(300)
+    }).strict(),
+    serverVersion: z.string().trim().min(1),
+    buildId: z.string().trim().min(1),
+    portfolioAdoptionStatus: z.enum([
+      "NOT_REQUIRED",
+      "REQUIRED",
+      "CURRENT",
+      "CHANGED",
+      "UNKNOWN"
+    ]),
+    marketChannel: z
+      .object({
+        state: z.enum(["idle", "connecting", "running", "failed", "stopped"]),
+        generation: z.number().int().nonnegative(),
+        subscribedTokenCount: z.number().int().nonnegative(),
+        freshBookCount: z.number().int().nonnegative()
+      })
+      .strict(),
+    supervisorMode: z.enum([
+      "IDLE",
+      "ARMED",
+      "AGENT_ACTIVE",
+      "LOCKED_RECONCILING",
+      "DEGRADED"
+    ]),
     paperGate: paperGateSchema,
     capturedAt: timestampSchema
   })
@@ -445,11 +500,28 @@ export const prepareMarketEvidenceInputSchema = z
     tokenId: identifierSchema,
     estimatedProbability: probabilityDecimalSchema,
     eventVolatilityClass: z.enum(["SLOW", "FAST"]),
+    executionMode: z.enum(["paper", "live"]).default("paper"),
     modelVersion: z.string().trim().min(1).max(200),
     rationale: z.string().trim().min(20).max(5_000),
-    counterRationale: z.string().trim().min(20).max(5_000)
+    counterRationale: z.string().trim().min(20).max(5_000),
+    cycleId: identifierSchema.optional(),
+    candidateSnapshotId: identifierSchema.optional()
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.cycleId === undefined) !== (value.candidateSnapshotId === undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "cycleId and candidateSnapshotId must be provided together."
+      });
+    }
+    if (value.executionMode === "live" && value.cycleId === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Live market evidence requires cycleId and candidateSnapshotId."
+      });
+    }
+  });
 
 export const marketEvidenceSourceSchema = z
   .object({
@@ -478,6 +550,140 @@ export const prepareMarketEvidenceOutputSchema = z
     analysisHash: proposalHashSchema
   })
   .strict();
+
+export const prepareAgentEvidenceInputSchema = z
+  .object({
+    agentRunId: identifierSchema,
+    conditionId: identifierSchema,
+    tokenId: identifierSchema,
+    estimatedProbability: probabilityDecimalSchema,
+    eventVolatilityClass: z.enum(["SLOW", "FAST"]),
+    executionMode: z.enum(["paper", "live"]).default("paper"),
+    sourceUrls: z.array(httpsUrlSchema).min(2).max(5),
+    sourceEvidence: z.array(researchSourceEvidenceSchema).min(2).max(5),
+    modelVersion: z.string().trim().min(1).max(200),
+    rationale: z.string().trim().min(20).max(5_000),
+    counterRationale: z.string().trim().min(20).max(5_000),
+    cycleId: identifierSchema.optional(),
+    candidateSnapshotId: identifierSchema.optional()
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.cycleId === undefined) !== (value.candidateSnapshotId === undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "cycleId and candidateSnapshotId must be provided together."
+      });
+    }
+    if (value.executionMode === "live" && value.cycleId === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Live agent evidence requires cycleId and candidateSnapshotId."
+      });
+    }
+  });
+
+export const prepareAgentCycleInputSchema = z
+  .object({
+    agentRunId: identifierSchema,
+    categories: z
+      .array(marketCategorySchema)
+      .min(1)
+      .max(3)
+      .default(["politics", "economics", "technology"]),
+    limit: z.number().int().min(1).max(10).default(10),
+    minLiquidityPusd: nonNegativeDecimalSchema.optional()
+  })
+  .strict();
+
+export const prepareAgentCycleOutputSchema = z
+  .object({
+    cycleId: identifierSchema,
+    agentRunId: identifierSchema,
+    channelGeneration: z.number().int().positive(),
+    candidates: z.array(
+      z.object({
+        conditionId: identifierSchema,
+        tokenId: identifierSchema,
+        question: z.string().trim().min(1),
+        category: marketCategorySchema,
+        status: z.enum([
+          "READY",
+          "SKIPPED_BOOK_UNAVAILABLE",
+          "SKIPPED_MARKET_CHANGED"
+        ]),
+        candidateSnapshotId: identifierSchema.nullable(),
+        snapshot: marketSnapshotSchema.nullable(),
+        reasonCode: identifierSchema.nullable()
+      }).strict()
+    ).max(10),
+    preparedAt: timestampSchema,
+    expiresAt: timestampSchema
+  })
+  .strict();
+
+export const prepareAgentEvidenceOutputSchema = z
+  .object({
+    researchBundleId: identifierSchema,
+    conditionId: identifierSchema,
+    tokenId: identifierSchema,
+    estimatedProbability: probabilityDecimalSchema,
+    eventVolatilityClass: z.enum(["SLOW", "FAST"]),
+    evidenceKind: z.literal("HYBRID"),
+    modelVersion: z.string().trim().min(1),
+    createdAt: timestampSchema,
+    expiresAt: timestampSchema,
+    sources: z.array(verifiedSourceSchema).min(2),
+    marketSources: z.array(marketEvidenceSourceSchema).min(2),
+    rationale: z.string().trim().min(20),
+    counterRationale: z.string().trim().min(20),
+    contentHash: proposalHashSchema,
+    analysisHash: proposalHashSchema
+  })
+  .strict();
+
+const agentPolicyOutputSchema = z
+  .object({
+    version: z.string().trim().min(1),
+    canaryMaxOrderPusd: nonNegativeDecimalSchema,
+    pilotMaxOrderPusd: nonNegativeDecimalSchema,
+    canaryMaxOpenExposurePusd: nonNegativeDecimalSchema,
+    pilotMaxOpenExposurePusd: nonNegativeDecimalSchema,
+    maxMarketOrCorrelationPusd: nonNegativeDecimalSchema,
+    maxOpenMarkets: z.number().int().min(1).max(5),
+    minEdge: probabilityDecimalSchema,
+    maxSpread: probabilityDecimalSchema,
+    depthMultiplier: z.number().int().min(5).max(10),
+    decisionIntervalSeconds: z.number().int().min(30).max(300),
+    lastIncreaseAt: timestampSchema.nullable(),
+    reconciledTradeCountAtIncrease: z.number().int().nonnegative(),
+    lastLossMarketConditionId: identifierSchema.nullable(),
+    lastLossAt: timestampSchema.nullable()
+  })
+  .strict();
+
+export const getAgentPolicyInputSchema = z.object({}).strict();
+export const getAgentPolicyOutputSchema = z
+  .object({ policy: agentPolicyOutputSchema, capturedAt: timestampSchema })
+  .strict();
+
+export const adjustAgentPolicyInputSchema = z
+  .object({
+    agentRunId: identifierSchema,
+    rationale: z.string().trim().min(20).max(2_000),
+    canaryMaxOrderPusd: nonNegativeDecimalSchema.optional(),
+    pilotMaxOrderPusd: nonNegativeDecimalSchema.optional(),
+    canaryMaxOpenExposurePusd: nonNegativeDecimalSchema.optional(),
+    pilotMaxOpenExposurePusd: nonNegativeDecimalSchema.optional(),
+    maxMarketOrCorrelationPusd: nonNegativeDecimalSchema.optional(),
+    maxOpenMarkets: z.number().int().min(1).max(5).optional(),
+    minEdge: probabilityDecimalSchema.optional(),
+    maxSpread: probabilityDecimalSchema.optional(),
+    depthMultiplier: z.number().int().min(5).max(10).optional(),
+    decisionIntervalSeconds: z.number().int().min(30).max(300).optional()
+  })
+  .strict();
+export const adjustAgentPolicyOutputSchema = getAgentPolicyOutputSchema;
 
 export const stageOrderInputSchema = z
   .object({
@@ -616,7 +822,7 @@ export const tradingSessionStatusSchema = z.enum([
 export const prepareTradingSessionInputSchema = z
   .object({
     executionMode: z.enum(["paper", "live"]).default("paper"),
-    ttlHours: z.number().positive().max(24).default(8)
+    ttlHours: z.number().positive().max(8).default(8)
   })
   .strict();
 
@@ -700,7 +906,14 @@ export const agentRunOutputSchema = z
     lastHeartbeatAt: timestampSchema,
     leaseExpiresAt: timestampSchema,
     stoppedAt: timestampSchema.nullable(),
-    stopReason: z.string().nullable()
+    stopReason: z.string().nullable(),
+    policyVersion: z.string().trim().min(1),
+    phase: z.enum(["STARTING", "ANALYZING", "STAGING", "EXECUTING", "HEARTBEAT", "STOPPING"]),
+    nextCycleAt: timestampSchema.nullable(),
+    controllerId: identifierSchema.optional(),
+    runtimeInstanceId: identifierSchema.optional(),
+    currentCycleId: identifierSchema.nullable().optional(),
+    lastToolActivityAt: timestampSchema.optional()
   })
   .strict();
 
@@ -811,6 +1024,22 @@ export type PrepareMarketEvidenceInput = z.infer<
 export type PrepareMarketEvidenceOutput = z.infer<
   typeof prepareMarketEvidenceOutputSchema
 >;
+export type PrepareAgentEvidenceInput = z.infer<
+  typeof prepareAgentEvidenceInputSchema
+>;
+export type PrepareAgentEvidenceOutput = z.infer<
+  typeof prepareAgentEvidenceOutputSchema
+>;
+export type PrepareAgentCycleInput = z.infer<
+  typeof prepareAgentCycleInputSchema
+>;
+export type PrepareAgentCycleOutput = z.infer<
+  typeof prepareAgentCycleOutputSchema
+>;
+export type GetAgentPolicyInput = z.infer<typeof getAgentPolicyInputSchema>;
+export type GetAgentPolicyOutput = z.infer<typeof getAgentPolicyOutputSchema>;
+export type AdjustAgentPolicyInput = z.infer<typeof adjustAgentPolicyInputSchema>;
+export type AdjustAgentPolicyOutput = z.infer<typeof adjustAgentPolicyOutputSchema>;
 export type StageOrderInput = z.infer<typeof stageOrderInputSchema>;
 export type StageOrderOutput = z.infer<typeof stageOrderOutputSchema>;
 export type ExecuteStagedOrderInput = z.infer<

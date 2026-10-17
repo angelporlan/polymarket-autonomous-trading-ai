@@ -5,7 +5,11 @@ export type OrderSide = "BUY" | "SELL";
 export type ExecutionMode = "paper" | "live";
 export type OrderIntentType = "ENTRY" | "EXIT";
 export type AgentRunStatus = "ACTIVE" | "STOPPING" | "STOPPED" | "EXPIRED" | "LOCKED";
+export type AgentRunPhase = "STARTING" | "ANALYZING" | "STAGING" | "EXECUTING" | "HEARTBEAT" | "STOPPING";
 export type DecisionOwner = "daemon" | "agent";
+export type PortfolioPositionManagement =
+  | "AGENT_MANAGED"
+  | "GRANDFATHERED_REDUCE_ONLY";
 export type ExitReason =
   | "STOP_LOSS_TRIGGERED"
   | "TAKE_PROFIT_TRIGGERED"
@@ -53,6 +57,15 @@ export interface MarketSnapshot {
   bids: PriceLevel[];
   asks: PriceLevel[];
   capturedAtMs: number;
+  /** Remote exchange event time. It may predate local receipt for quiet books. */
+  sourceTimestampMs?: number;
+  /** Local time at which this exact view was received and validated. */
+  receivedAtMs?: number;
+  /** Changes whenever the public market channel reconnects. */
+  channelGeneration?: number;
+  /** Exchange-provided hash, or a deterministic local hash when omitted. */
+  bookHash?: string;
+  marketDataSource?: "REST" | "WEBSOCKET";
 }
 
 export interface EvidenceSource {
@@ -96,10 +109,13 @@ export interface ResearchBundle {
   counterRationale: string;
   contentHash: string;
   /** Market-only evidence is deliberately distinct from external research. */
-  evidenceKind?: "EXTERNAL" | "MARKET_DATA";
+  evidenceKind?: "EXTERNAL" | "MARKET_DATA" | "HYBRID";
   marketSources?: MarketDataEvidenceSource[];
   modelVersion?: string;
   analysisHash?: string;
+  agentRunId?: string;
+  agentCycleId?: string;
+  candidateSnapshotId?: string;
 }
 
 export interface MarketDataEvidenceSource {
@@ -119,6 +135,14 @@ export interface AgentRun {
   leaseExpiresAtMs: number;
   stoppedAtMs: number | null;
   stopReason: string | null;
+  policyVersion: string;
+  phase: AgentRunPhase;
+  nextCycleAtMs: number | null;
+  /** Binding prevents a stale run record from being reused by another host. */
+  controllerId?: string;
+  runtimeInstanceId?: string;
+  currentCycleId?: string | null;
+  lastToolActivityAtMs?: number;
 }
 
 export interface OrderIntent {
@@ -148,6 +172,8 @@ export interface RiskContext {
   dailyPnlMicros: bigint;
   dailyPnlKnown?: boolean;
   totalOpenExposureMicros: bigint;
+  /** Exposure opened by this agent, excluding adopted reduce-only inventory. */
+  agentManagedOpenExposureMicros?: bigint;
   marketExposureMicros: bigint;
   correlatedExposureMicros: bigint;
   openMarketCount: number;
@@ -311,6 +337,7 @@ export interface PortfolioPosition {
   cashPnlMicros: bigint;
   realizedPnlMicros: bigint;
   endTimeMs: number;
+  managementPolicy?: PortfolioPositionManagement;
 }
 
 export interface PortfolioSnapshot {

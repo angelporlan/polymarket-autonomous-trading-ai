@@ -72,6 +72,87 @@ describe("public order-book validation", () => {
     });
   });
 
+  it("accepts a freshly received WebSocket book when the REST timestamp is stale", async () => {
+    const client = snapshotClient({
+      ...validBook(),
+      timestamp: String(NOW_MS - 60_000)
+    });
+
+    await expect(
+      client.getMarketSnapshot({
+        conditionId: CONDITION_ID,
+        tokenId: TOKEN_ID,
+        realtimeBook: {
+          conditionId: CONDITION_ID,
+          tokenId: TOKEN_ID,
+          bids: [{ priceMicros: 400_000n, sharesMicros: 10_000_000n }],
+          asks: [{ priceMicros: 410_000n, sharesMicros: 10_000_000n }],
+          sourceTimestampMs: NOW_MS - 60_000,
+          receivedAtMs: NOW_MS - 100,
+          channelGeneration: 3,
+          bookHash: "deadbeef",
+          tickSizeMicros: 10_000n
+        }
+      })
+    ).resolves.toMatchObject({
+      capturedAtMs: NOW_MS - 100,
+      sourceTimestampMs: NOW_MS - 60_000,
+      receivedAtMs: NOW_MS - 100,
+      channelGeneration: 3,
+      bookHash: "deadbeef",
+      marketDataSource: "WEBSOCKET"
+    });
+  });
+
+  it("classifies a WebSocket receipt that expires during enrichment as stale", async () => {
+    const client = snapshotClient({
+      ...validBook(),
+      timestamp: String(NOW_MS - 60_000)
+    });
+
+    await expect(
+      client.getMarketSnapshot({
+        conditionId: CONDITION_ID,
+        tokenId: TOKEN_ID,
+        realtimeBook: {
+          conditionId: CONDITION_ID,
+          tokenId: TOKEN_ID,
+          bids: [{ priceMicros: 400_000n, sharesMicros: 10_000_000n }],
+          asks: [{ priceMicros: 410_000n, sharesMicros: 10_000_000n }],
+          sourceTimestampMs: NOW_MS - 60_000,
+          receivedAtMs: NOW_MS - 5_001,
+          channelGeneration: 3,
+          bookHash: "deadbeef",
+          tickSizeMicros: 10_000n
+        }
+      })
+    ).rejects.toMatchObject({
+      code: "CLOB_MARKET_CHANNEL_BOOK_STALE"
+    });
+  });
+
+  it("rejects a contradiction between fresh REST and WebSocket top-of-book", async () => {
+    const client = snapshotClient(validBook());
+
+    await expect(
+      client.getMarketSnapshot({
+        conditionId: CONDITION_ID,
+        tokenId: TOKEN_ID,
+        realtimeBook: {
+          conditionId: CONDITION_ID,
+          tokenId: TOKEN_ID,
+          bids: [{ priceMicros: 390_000n, sharesMicros: 10_000_000n }],
+          asks: [{ priceMicros: 420_000n, sharesMicros: 10_000_000n }],
+          sourceTimestampMs: NOW_MS - 1_000,
+          receivedAtMs: NOW_MS - 100,
+          channelGeneration: 3,
+          bookHash: "cafebabe",
+          tickSizeMicros: 10_000n
+        }
+      })
+    ).rejects.toMatchObject({ code: "CLOB_BOOK_CROSSCHECK_MISMATCH" });
+  });
+
   it("rejects malformed levels instead of silently dropping them", async () => {
     const client = snapshotClient({
       ...validBook(),
